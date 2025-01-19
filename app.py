@@ -292,6 +292,24 @@ def download_result(token):
         print("Traceback:", traceback.format_exc())
         return request_handler.create_error_response(str(e), 500)
 
+@app.route('/web/cancel/<task_id>', methods=['POST'])
+def cancel_task(task_id):
+    """Cancel a running or queued task"""
+    try:
+        # Try to cancel the task
+        cancelled = task_handler.cancel_task(task_id)
+        if cancelled:
+            return request_handler.create_success_response({
+                'status': 'success',
+                'message': 'Task cancelled successfully'
+            })
+        else:
+            return request_handler.create_error_response('Task not found or already completed', 404)
+            
+    except Exception as e:
+        print(f"Error cancelling task: {str(e)}")
+        return request_handler.create_error_response(str(e), 500)
+
 # Start background threads
 cleanup_thread = threading.Thread(target=task_handler.cleanup_old_files, daemon=True)
 cleanup_thread.start()

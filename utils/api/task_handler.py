@@ -26,6 +26,7 @@ class TaskHandler:
         self.task_queue = queue.Queue(maxsize=self.MAX_QUEUE_SIZE)
         self.active_tasks = {}
         self.task_lock = threading.Lock()
+        self.cancelled_tasks = set()  # Track cancelled tasks
         
         # Create base directories
         for folder in [self.BASE_UPLOAD_FOLDER, self.BASE_OUTPUT_FOLDER]:
@@ -48,10 +49,51 @@ class TaskHandler:
         with self.task_lock:
             return self.active_tasks.get(task_id)
     
+    def cancel_task(self, task_id):
+        """Cancel a task if it's still running or queued.
+        
+        Args:
+            task_id (str): The ID of the task to cancel
+            
+        Returns:
+            bool: True if task was cancelled, False if task not found or already completed
+        """
+        with self.task_lock:
+            task = self.active_tasks.get(task_id)
+            if not task:
+                return False
+                
+            # Can only cancel tasks that are queued or processing
+            if task['status'] not in ['queued', 'processing']:
+                return False
+                
+            # Mark task as cancelled
+            self.cancelled_tasks.add(task_id)
+            task['status'] = 'cancelled'
+            task['stage'] = 'Cancelled by user'
+            task['progress'] = 100
+            
+            # Clean up task resources
+            input_folder = task.get('input_folder')
+            if input_folder and os.path.exists(input_folder):
+                try:
+                    shutil.rmtree(input_folder)
+                    print(f"Cleaned up input folder for cancelled task: {input_folder}")
+                except Exception as e:
+                    print(f"Error cleaning up input folder: {str(e)}")
+            
+            print(f"Task {task_id} cancelled successfully")
+            return True
+    
     def process_task(self, task_id, input_folder, params, execute_func):
         """Process a single task and update its status."""
         output_folder = None
         try:
+            # Check if task was cancelled
+            if task_id in self.cancelled_tasks:
+                print(f"Task {task_id} was cancelled, skipping processing")
+                return None
+                
             print(f"\n=== Processing Task {task_id} ===")
             print("Input Folder:", input_folder)
             print("Raw Parameters:", params)
@@ -63,6 +105,11 @@ class TaskHandler:
             # Initialize task (5%)
             if task_id:
                 with self.task_lock:
+                    # Check again for cancellation
+                    if task_id in self.cancelled_tasks:
+                        print(f"Task {task_id} was cancelled during initialization")
+                        return None
+                        
                     self.active_tasks[task_id]['status'] = 'processing'
                     self.active_tasks[task_id]['progress'] = 5
                     self.active_tasks[task_id]['stage'] = 'Initializing model and parameters'
