@@ -371,5 +371,5 @@ queue_thread.start()
 logger_handler.log_system('Background threads started')
 
 if __name__ == '__main__':
-    logger_handler.log_system('Starting Flask server on port 5010')
+    logger_handler.log_system('Starting Flask server on port 8000')
     app.run(host='0.0.0.0', port=8000) 
