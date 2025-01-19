@@ -53,10 +53,11 @@ class RequestHandler:
             files = [file]
             
         else:
-            # For custom data, handle multiple files
+            # For custom data, handle either ZIP file or JPG+JGW pairs
             files = []
             jpg_found = False
             jgw_found = False
+            zip_found = False
             
             # Check all uploaded files
             for key in request.files:
@@ -68,16 +69,21 @@ class RequestHandler:
                     raise ValueError(f'Invalid file type: {file.filename}')
                     
                 ext = file.filename.rsplit('.', 1)[1].lower()
-                if ext == 'jpg':
+                if ext == 'zip':
+                    zip_found = True
+                    files = [file]  # If ZIP file found, use only that
+                    break  # No need to check other files
+                elif ext == 'jpg':
                     jpg_found = True
                 elif ext == 'jgw':
                     jgw_found = True
                     
-                files.append(file)
+                if not zip_found:
+                    files.append(file)
             
-            # Validate we have both JPG and JGW files
-            if input_type == '1' and not (jpg_found and jgw_found):
-                raise ValueError('Both JPG and JGW files are required for custom data')
+            # Validate we have either a ZIP file or both JPG and JGW files
+            if not zip_found and not (jpg_found and jgw_found):
+                raise ValueError('Either a ZIP file or both JPG and JGW files are required for custom data')
         
         # Get parameters based on content type
         if request.content_type == 'application/json':
