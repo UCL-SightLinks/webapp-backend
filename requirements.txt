@@ -1,3 +1,6 @@
-Flask==2.0.1
+flask==2.2.5
+werkzeug==2.2.3
+
 PyJWT==2.8.0
 flask-cors==4.0.0
+
