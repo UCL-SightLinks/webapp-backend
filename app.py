@@ -1,377 +1,302 @@
-from flask import Flask, request, jsonify, send_file
+"""
+API Documentation
+
+Base URL: http://localhost:5010
+
+1. Direct Processing API
+   Endpoint: /api/predict
+   Method: POST
+   Description: Synchronously processes uploaded files and returns results immediately
+   Parameters:
+   - file: ZIP file containing images (required)
+   - input_type: Input type (0-1, default: 0)
+   - classification_threshold: Classification threshold (0-1, default: 0.35)
+   - prediction_threshold: Prediction threshold (0-1, default: 0.5)
+   - save_labeled_image: Whether to save labeled images (true/false, default: false)
+   - output_type: Output type (0=JSON, 1=TXT, default: 0)
+   - yolo_model_type: YOLO model type (n/s/m/l, default: n)
+   Response: ZIP file containing results
+
+2. Web Processing API (Queued)
+   Endpoint: /web/predict
+   Method: POST
+   Description: Asynchronously processes files with progress tracking
+   Parameters: Same as Direct API
+   Response: 
+   {
+     "task_id": "uuid",
+     "message": "Task queued successfully"
+   }
+
+3. Task Status
+   Endpoint: /web/status/<task_id>
+   Method: GET
+   Description: Get task status and progress
+   Response:
+   {
+     "status": "queued|processing|completed|failed",
+     "progress": 0-100,
+     "stage": "current_stage",
+     "download_token": "token" (when completed),
+     "error": "error_message" (if failed)
+   }
+
+4. Download Results
+   Endpoint: /download/<token>
+   Method: GET
+   Description: Download processed results using token
+   Response: ZIP file containing results
+
+Notes:
+- All uploads must be ZIP files
+- Files are automatically cleaned up after 2 hours
+- ZIP files are kept for 4 hours
+- Progress updates are provided in real-time
+- Failed tasks include error messages
+"""
+
+from flask import Flask, request, send_file
+from flask_cors import CORS
 from main import execute
-import os
-from werkzeug.utils import secure_filename
-import shutil
-import uuid
-from datetime import datetime, timedelta
-import jwt
 import threading
-import time
-import queue
-from utils.compress import compress_folder_to_zip
+import os
+from datetime import datetime
+import zipfile
+
+from utils.api.task_handler import TaskHandler
+from utils.api.auth_handler import AuthHandler
+from utils.api.file_handler import FileHandler
+from utils.api.request_handler import RequestHandler
 
 app = Flask(__name__)
+# Enable CORS for all origins
+CORS(app, resources={
+    r"/*": {
+        "origins": "*",  # Allow all origins
+        "methods": ["GET", "POST", "OPTIONS"],
+        "allow_headers": ["Content-Type", "Authorization"],
+        "expose_headers": ["Content-Disposition"]
+    }
+})
 
-# Configure base folders and settings
-BASE_UPLOAD_FOLDER = 'input'
-BASE_OUTPUT_FOLDER = 'run/output'
-ALLOWED_EXTENSIONS = {'zip'}
-JWT_SECRET = os.getenv('JWT_SECRET', 'your-secret-key')  # In production, use environment variable
-MAX_FILE_AGE_HOURS = 2
-MAX_QUEUE_SIZE = 10
-
-# Task queue and tracking
-task_queue = queue.Queue(maxsize=MAX_QUEUE_SIZE)
-active_tasks = {}
-task_lock = threading.Lock()
-
-# Create base directories if they don't exist
-for folder in [BASE_UPLOAD_FOLDER, BASE_OUTPUT_FOLDER]:
-    if not os.path.exists(folder):
-        os.makedirs(folder)
-
-def allowed_file(filename):
-    return '.' in filename and filename.rsplit('.', 1)[1].lower() in ALLOWED_EXTENSIONS
-
-def create_session_folders():
-    """Create unique session folders for input and output"""
-    session_id = f"{datetime.now().strftime('%Y%m%d_%H%M%S')}_{str(uuid.uuid4())[:8]}"
-    input_folder = os.path.join(BASE_UPLOAD_FOLDER, session_id)
-    os.makedirs(input_folder, exist_ok=True)
-    return session_id, input_folder
-
-def generate_download_token(session_id, output_folder):
-    """Generate a JWT token for file download"""
-    expiration = datetime.utcnow() + timedelta(hours=MAX_FILE_AGE_HOURS)
-    token = jwt.encode({
-        'session_id': session_id,
-        'output_folder': output_folder,
-        'exp': expiration
-    }, JWT_SECRET, algorithm='HS256')
-    return token
-
-def verify_download_token(token):
-    """Verify JWT token and return payload if valid"""
-    try:
-        payload = jwt.decode(token, JWT_SECRET, algorithms=['HS256'])
-        return payload
-    except (jwt.ExpiredSignatureError, jwt.InvalidTokenError):
-        return None
-
-def process_task(task_id, input_folder, params):
-    """Process a single task and update its status"""
-    try:
-        with task_lock:
-            active_tasks[task_id]['status'] = 'processing'
-            active_tasks[task_id]['progress'] = 10
-            print(f"Processing task {task_id}: Starting...")
-
-        # Execute the model - unpack params as individual arguments
-        with task_lock:
-            active_tasks[task_id]['progress'] = 20
-            print(f"Processing task {task_id}: Executing model...")
-
-        try:
-            execute(
-                input_folder,  # uploadDir
-                int(params['input_type']),  # inputType
-                float(params['classification_threshold']),  # classificationThreshold
-                float(params['prediction_threshold']),  # predictionThreshold
-                params['save_labeled_image'].lower() == 'true',  # saveLabeledImage
-                int(params['output_type']),  # outputType
-                params['yolo_model_type']  # yoloModelType
-            )
-            # Update progress after model execution
-            with task_lock:
-                active_tasks[task_id]['progress'] = 80
-                print(f"Processing task {task_id}: Model execution complete")
-        except Exception as e:
-            print(f"Error during model execution: {str(e)}")
-            raise
-
-        # Get the output folder path based on timestamp
-        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        output_folder = os.path.join("run/output", timestamp)
-        
-        # Verify output folder exists
-        if not os.path.exists(output_folder):
-            # Try finding the most recent output folder
-            output_folders = [f for f in os.listdir("run/output") if os.path.isdir(os.path.join("run/output", f))]
-            if output_folders:
-                output_folders.sort(reverse=True)  # Sort by name (timestamp) in reverse order
-                output_folder = os.path.join("run/output", output_folders[0])
-                print(f"Processing task {task_id}: Found output folder {output_folder}")
-
-        if not os.path.exists(output_folder):
-            raise Exception("Output folder not found")
-
-        with task_lock:
-            active_tasks[task_id]['progress'] = 90
-            print(f"Processing task {task_id}: Creating ZIP file...")
-
-        # Create ZIP file for output
-        zip_name = f"{os.path.basename(output_folder)}.zip"
-        zip_path = compress_folder_to_zip(output_folder, zip_name)
-        
-        if isinstance(zip_path, str) and os.path.exists(zip_path):
-            with task_lock:
-                active_tasks[task_id]['status'] = 'completed'
-                active_tasks[task_id]['progress'] = 100
-                active_tasks[task_id]['output_folder'] = output_folder
-                active_tasks[task_id]['zip_path'] = zip_path
-                print(f"Processing task {task_id}: Completed successfully")
-        else:
-            raise Exception(f"Failed to create ZIP file: {zip_path}")
-
-    except Exception as e:
-        error_msg = str(e)
-        print(f"Error processing task {task_id}: {error_msg}")
-        with task_lock:
-            active_tasks[task_id]['status'] = 'failed'
-            active_tasks[task_id]['error'] = error_msg
-            # Clean up input folder on error
-            if os.path.exists(input_folder):
-                try:
-                    shutil.rmtree(input_folder)
-                except Exception as cleanup_error:
-                    print(f"Error cleaning up input folder: {str(cleanup_error)}")
-        raise
-
-def queue_processor():
-    """Process tasks from the queue"""
-    while True:
-        try:
-            task = task_queue.get()
-            if task is None:  # Shutdown signal
-                break
-            
-            process_task(task['id'], task['input_folder'], task['params'])
-            task_queue.task_done()
-        except Exception as e:
-            print(f"Task processing error: {str(e)}")
-
-def cleanup_old_files():
-    """Clean up files older than MAX_FILE_AGE_HOURS"""
-    while True:
-        try:
-            current_time = datetime.now()
-            # Clean up output folders and their ZIPs
-            for folder in os.listdir(BASE_OUTPUT_FOLDER):
-                folder_path = os.path.join(BASE_OUTPUT_FOLDER, folder)
-                if os.path.isdir(folder_path):
-                    folder_time = datetime.strptime(folder.split('_')[0], '%Y%m%d')
-                    if current_time - folder_time > timedelta(hours=MAX_FILE_AGE_HOURS):
-                        # Remove ZIP file if exists
-                        zip_path = os.path.join(os.path.dirname(folder_path), f"{folder}.zip")
-                        if os.path.exists(zip_path):
-                            os.remove(zip_path)
-                        shutil.rmtree(folder_path)
-            
-            # Clean up input folders
-            for folder in os.listdir(BASE_UPLOAD_FOLDER):
-                folder_path = os.path.join(BASE_UPLOAD_FOLDER, folder)
-                if os.path.isdir(folder_path):
-                    folder_time = datetime.strptime(folder.split('_')[0], '%Y%m%d')
-                    if current_time - folder_time > timedelta(hours=MAX_FILE_AGE_HOURS):
-                        shutil.rmtree(folder_path)
-        except Exception as e:
-            print(f"Cleanup error: {str(e)}")
-        time.sleep(1800)  # Run every 30 minutes
+# Initialize handlers
+file_handler = FileHandler()
+auth_handler = AuthHandler()
+task_handler = TaskHandler()
+request_handler = RequestHandler(file_handler)
 
 @app.route('/api/predict', methods=['POST'])
 def predict_api():
     """Direct API endpoint that waits for completion"""
-    if 'file' not in request.files:
-        return jsonify({'error': 'No file uploaded'}), 400
-    
-    file = request.files['file']
-    if file.filename == '' or not allowed_file(file.filename):
-        return jsonify({'error': 'Invalid file'}), 400
-
     try:
-        # Create session folders
-        session_id, input_folder = create_session_folders()
-
-        # Save uploaded file
-        filename = secure_filename(file.filename)
-        filepath = os.path.join(input_folder, filename)
-        file.save(filepath)
-
-        # Get parameters and convert types
-        params = {
-            'input_type': request.form.get('input_type', '0'),
-            'classification_threshold': request.form.get('classification_threshold', '0.35'),
-            'prediction_threshold': request.form.get('prediction_threshold', '0.5'),
-            'save_labeled_image': request.form.get('save_labeled_image', 'false'),
-            'output_type': request.form.get('output_type', '0'),
-            'yolo_model_type': request.form.get('yolo_model_type', 'n')
-        }
-
-        # Process directly
-        execute(
-            input_folder,  # uploadDir
-            int(params['input_type']),  # inputType
-            float(params['classification_threshold']),  # classificationThreshold
-            float(params['prediction_threshold']),  # predictionThreshold
-            params['save_labeled_image'].lower() == 'true',  # saveLabeledImage
-            int(params['output_type']),  # outputType
-            params['yolo_model_type']  # yoloModelType
-        )
-
-        # Get the output folder path based on timestamp
-        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        output_folder = os.path.join("run/output", timestamp)
+        # Parse request
+        file, params = request_handler.parse_request_parameters(request)
         
-        # Verify output folder exists
-        if not os.path.exists(output_folder):
-            # Try finding the most recent output folder
-            output_folders = [f for f in os.listdir("run/output") if os.path.isdir(os.path.join("run/output", f))]
-            if output_folders:
-                output_folders.sort(reverse=True)  # Sort by name (timestamp) in reverse order
-                output_folder = os.path.join("run/output", output_folders[0])
-
-        if not os.path.exists(output_folder):
-            raise Exception("Output folder not found")
-
-        # Create ZIP file
-        zip_name = f"{os.path.basename(output_folder)}.zip"
-        zip_path = compress_folder_to_zip(output_folder, zip_name)
-
-        if isinstance(zip_path, str) and os.path.exists(zip_path):
-            return send_file(
-                zip_path,
-                as_attachment=True,
-                attachment_filename='result.zip',
-                mimetype='application/zip'
-            )
+        # Create session folders
+        session_id, input_folder = file_handler.create_session_folders()
+        
+        # Save file
+        filepath = request_handler.save_uploaded_file(file, input_folder)
+        
+        # Process directly
+        task_id = task_handler.process_task(None, input_folder, params, execute)
+        
+        # Get task result
+        task = task_handler.get_task_status(task_id)
+        
+        if task['status'] == 'failed':
+            return request_handler.create_error_response(task['error'], 500)
+            
+        # Return response based on client preference
+        if request_handler.wants_json_response(request):
+            return request_handler.create_success_response({
+                'status': 'success',
+                'message': 'Processing completed',
+                'output_path': task['zip_path']
+            })
         else:
-            raise Exception(f"Failed to create ZIP file: {zip_path}")
-
+            return file_handler.send_file_response(task['zip_path'])
+            
+    except ValueError as ve:
+        return request_handler.create_error_response(str(ve), 400)
     except Exception as e:
-        if 'input_folder' in locals() and os.path.exists(input_folder):
-            shutil.rmtree(input_folder)
-        return jsonify({'error': str(e)}), 500
+        return request_handler.create_error_response(str(e), 500)
 
 @app.route('/web/predict', methods=['POST'])
 def predict_web():
     """Web endpoint with queuing and progress tracking"""
-    if 'file' not in request.files:
-        return jsonify({'error': 'No file uploaded'}), 400
-    
-    file = request.files['file']
-    if file.filename == '' or not allowed_file(file.filename):
-        return jsonify({'error': 'Invalid file'}), 400
-
     try:
+        # Parse request
+        file, params = request_handler.parse_request_parameters(request)
+        
         # Check queue size
-        if task_queue.full():
-            return jsonify({'error': 'Server is busy. Please try again later.'}), 503
-
+        if task_handler.task_queue.full():
+            return request_handler.create_error_response('Server is busy. Please try again later.', 503)
+        
         # Create session folders
-        session_id, input_folder = create_session_folders()
-
-        # Save uploaded file
-        filename = secure_filename(file.filename)
-        filepath = os.path.join(input_folder, filename)
-        file.save(filepath)
-
-        # Get parameters (keep as strings, convert in process_task)
-        params = {
-            'input_type': request.form.get('input_type', '0'),
-            'classification_threshold': request.form.get('classification_threshold', '0.35'),
-            'prediction_threshold': request.form.get('prediction_threshold', '0.5'),
-            'save_labeled_image': request.form.get('save_labeled_image', 'false'),
-            'output_type': request.form.get('output_type', '0'),
-            'yolo_model_type': request.form.get('yolo_model_type', 'n')
-        }
-
+        session_id, input_folder = file_handler.create_session_folders()
+        
+        # Save file
+        filepath = request_handler.save_uploaded_file(file, input_folder)
+        
         # Create task
-        task_id = str(uuid.uuid4())
-
-        # Initialize task status
-        with task_lock:
-            active_tasks[task_id] = {
-                'status': 'queued',
-                'progress': 0,
-                'created_at': datetime.now(),
-                'session_id': session_id,
-                'input_folder': input_folder
-            }
-
-        # Add to queue
-        task_queue.put({
+        task_id = task_handler.add_task({
+            'status': 'queued',
+            'progress': 0,
+            'stage': 'Queued',
+            'created_at': datetime.now(),
+            'session_id': session_id,
+            'input_folder': input_folder
+        })
+        
+        # Queue task
+        task_handler.queue_task({
             'id': task_id,
             'input_folder': input_folder,
             'params': params
         })
-
-        return jsonify({
+        
+        return request_handler.create_success_response({
             'task_id': task_id,
             'message': 'Task queued successfully'
         })
-
+        
+    except ValueError as ve:
+        print(f"Validation error in predict_web: {str(ve)}")
+        return request_handler.create_error_response(str(ve), 400)
     except Exception as e:
-        if 'input_folder' in locals() and os.path.exists(input_folder):
-            shutil.rmtree(input_folder)
-        return jsonify({'error': str(e)}), 500
+        print(f"Error in predict_web: {str(e)}")
+        import traceback
+        print("Traceback:", traceback.format_exc())
+        return request_handler.create_error_response(str(e), 500)
 
 @app.route('/web/status/<task_id>', methods=['GET'])
 def task_status(task_id):
     """Get task status and progress"""
-    with task_lock:
-        task = active_tasks.get(task_id)
-        if not task:
-            return jsonify({'error': 'Task not found'}), 404
+    task = task_handler.get_task_status(task_id)
+    if not task:
+        return request_handler.create_error_response('Task not found', 404)
         
-        status_data = {
-            'status': task['status'],
-            'progress': task['progress']
-        }
-
-        if task['status'] == 'completed':
-            # Generate download token with the actual output folder
-            token = generate_download_token(task['session_id'], task['output_folder'])
+    status_data = {
+        'status': task['status'],
+        'progress': task['progress'],
+        'stage': task.get('stage', '')
+    }
+    
+    if task['status'] == 'completed':
+        if 'zip_path' in task:
+            # Get session_id from task data or use task_id as fallback
+            session_id = task.get('session_id', os.path.basename(os.path.dirname(task['zip_path'])))
+            token = auth_handler.generate_download_token(session_id, task_id)
             status_data['download_token'] = token
-            status_data['output_folder'] = task['output_folder']  # Include for debugging
-
-        elif task['status'] == 'failed':
-            status_data['error'] = task.get('error', 'Unknown error')
-
-        return jsonify(status_data)
+            print(f"\n=== Token Generation ===")
+            print(f"Task ID: {task_id}")
+            print(f"Session ID: {session_id}")
+            print(f"ZIP Path: {task['zip_path']}")
+            print(f"Token Generated: {token}")
+        else:
+            status_data['error'] = 'ZIP file not found'
+            status_data['status'] = 'failed'
+            
+    elif task['status'] == 'failed':
+        status_data['error'] = task.get('error', 'Unknown error')
+        
+    return request_handler.create_success_response(status_data)
 
 @app.route('/download/<token>', methods=['GET'])
 def download_result(token):
-    """Download the result file using a valid token"""
-    payload = verify_download_token(token)
-    if not payload:
-        return jsonify({'error': 'Invalid or expired token'}), 401
-
-    output_folder = payload['output_folder']
-    if not output_folder or not os.path.exists(output_folder):
-        return jsonify({'error': 'Output files no longer exist'}), 404
-
+    """Download the result file using a valid token."""
     try:
-        # Create ZIP file if it doesn't exist
-        zip_path = os.path.join(os.path.dirname(output_folder), f"{os.path.basename(output_folder)}.zip")
+        # Verify token
+        payload = auth_handler.verify_download_token(token)
+        if not payload:
+            return request_handler.create_error_response('Invalid token', 401)
+            
+        # Get task status to find the zip file path
+        task_id = payload.get('task_id')
+        if not task_id:
+            return request_handler.create_error_response('Invalid token payload', 401)
+            
+        task = task_handler.get_task_status(task_id)
+        if not task:
+            return request_handler.create_error_response('Task not found', 404)
+            
+        print(f"\n=== Download Request Details ===")
+        print(f"Task ID: {task_id}")
+        print(f"Task Status: {task.get('status')}")
+        print(f"Task Data: {task}")
+        
+        # Get and verify zip path
+        zip_path = task.get('zip_path')
+        if not zip_path:
+            return request_handler.create_error_response('ZIP path not found in task data', 404)
+            
         if not os.path.exists(zip_path):
-            zip_path = compress_folder_to_zip(output_folder, zip_path)
-
-        return send_file(
-            zip_path,
-            as_attachment=True,
-            attachment_filename='result.zip',
-            mimetype='application/zip'
-        )
+            return request_handler.create_error_response(f'ZIP file not found at path: {zip_path}', 404)
+            
+        file_size = os.path.getsize(zip_path)
+        if file_size == 0:
+            return request_handler.create_error_response('ZIP file is empty', 404)
+            
+        print(f"ZIP Path: {zip_path}")
+        print(f"File exists: Yes")
+        print(f"File size: {file_size} bytes")
+        
+        # Verify zip file integrity
+        try:
+            with zipfile.ZipFile(zip_path, 'r') as zf:
+                contents = zf.namelist()
+                print(f"ZIP contents: {contents}")
+                
+                # Get detailed file info
+                for name in contents:
+                    info = zf.getinfo(name)
+                    print(f"File: {name}")
+                    print(f"  Size: {info.file_size} bytes")
+                    print(f"  Compressed: {info.compress_size} bytes")
+                
+                if zf.testzip() is not None:
+                    return request_handler.create_error_response('ZIP file is corrupted', 500)
+                    
+                if not contents:
+                    return request_handler.create_error_response('ZIP file has no contents', 500)
+        except zipfile.BadZipFile as e:
+            return request_handler.create_error_response(f'Invalid ZIP file: {str(e)}', 500)
+        except Exception as e:
+            return request_handler.create_error_response(f'Error verifying ZIP file: {str(e)}', 500)
+        
+        print("\n=== Sending File ===")
+        print(f"File: {zip_path}")
+        print(f"Size: {file_size} bytes")
+        print(f"Contents: {contents}")
+        
+        # Always send file for download endpoint
+        try:
+            response = send_file(
+                zip_path,
+                as_attachment=True,
+                download_name='result.zip',
+                mimetype='application/zip'
+            )
+            response.headers['Content-Length'] = file_size
+            response.headers['Content-Type'] = 'application/zip'
+            response.headers['Content-Disposition'] = 'attachment; filename=result.zip'
+            print("File sending initiated successfully")
+            return response
+        except Exception as e:
+            print(f"Error sending file: {str(e)}")
+            return request_handler.create_error_response(f'Error sending file: {str(e)}', 500)
+            
     except Exception as e:
-        print(f"Error during download: {str(e)}")
-        return jsonify({'error': str(e)}), 500
+        print(f"Download error: {str(e)}")
+        print("Traceback:", traceback.format_exc())
+        return request_handler.create_error_response(str(e), 500)
 
 # Start background threads
-cleanup_thread = threading.Thread(target=cleanup_old_files, daemon=True)
+cleanup_thread = threading.Thread(target=task_handler.cleanup_old_files, daemon=True)
 cleanup_thread.start()
 
-queue_thread = threading.Thread(target=queue_processor, daemon=True)
+queue_thread = threading.Thread(target=task_handler.queue_processor, args=(execute,), daemon=True)
 queue_thread.start()
 
 if __name__ == '__main__':

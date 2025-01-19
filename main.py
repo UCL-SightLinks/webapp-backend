@@ -29,11 +29,25 @@ def execute(uploadDir = "input", inputType = "0", classificationThreshold = 0.35
     start_time = time.time()
     outputFolder = create_dir("run/output")
     extractDir = create_dir("run/extract")
-    # Extract files if needed
-    extract_files(inputType, uploadDir, extractDir)
-    # Run segmentation and prediction
-    boundBoxSegmentation(classificationThreshold, outputFolder, extractDir)
-    prediction(predictionThreshold, saveLabeledImage, outputType, outputFolder, yoloModelType)
-    print(f"Output saved to {outputFolder} as {outputType}.")
-    print(f"Total time taken: {time.time() - start_time:.2f} seconds")
-    clean_up(extractDir)
+    
+    # Convert parameters to proper types
+    outputType = int(outputType)  # Convert to integer
+    inputType = int(inputType)
+    classificationThreshold = float(classificationThreshold)
+    predictionThreshold = float(predictionThreshold)
+    saveLabeledImage = str(saveLabeledImage).lower() == 'true'
+    
+    try:
+        # Extract files if needed
+        extract_files(inputType, uploadDir, extractDir)
+        # Run segmentation and prediction
+        boundBoxSegmentation(classificationThreshold, outputFolder, extractDir)
+        output_path = prediction(predictionThreshold, saveLabeledImage, outputType, outputFolder, yoloModelType)
+        print(f"Output saved to {outputFolder} as {outputType}.")
+        print(f"Total time taken: {time.time() - start_time:.2f} seconds")
+        clean_up(extractDir)
+        return output_path
+    except Exception as e:
+        print(f"Error in execute: {str(e)}")
+        clean_up(extractDir)
+        raise e
