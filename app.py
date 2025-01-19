@@ -76,6 +76,7 @@ import threading
 import os
 from datetime import datetime
 import zipfile
+import json
 
 from utils.api.task_handler import TaskHandler
 from utils.api.auth_handler import AuthHandler
@@ -205,45 +206,60 @@ def predict_web():
         return request_handler.create_error_response(str(e), 500)
 
 @app.route('/web/status/<task_id>', methods=['GET'])
-def task_status(task_id):
-    """Get task status and progress"""
-    logger_handler.log_request('GET', f'/web/status/{task_id}')
-    
-    task = task_handler.get_task_status(task_id)
-    if not task:
-        logger_handler.log_error(f'Task not found: {task_id}')
-        return request_handler.create_error_response('Task not found', 404)
-    
-    logger_handler.log_task_status(
-        task_id,
-        task['status'],
-        progress=task['progress'],
-        stage=task.get('stage'),
-        error=task.get('error')
-    )
-    
-    status_data = {
-        'percentage': task['progress'],
-        'log': task.get('stage', '')
-    }
-    
-    if task['status'] == 'completed':
-        if 'zip_path' in task:
-            session_id = task.get('session_id', os.path.basename(os.path.dirname(task['zip_path'])))
-            token = auth_handler.generate_download_token(session_id, task_id)
-            status_data['download_token'] = token
-            status_data['percentage'] = 100
-            status_data['log'] = 'Task completed successfully'
-            logger_handler.log_system(f'Generated download token for task {task_id}')
-    elif task['status'] == 'failed':
-        status_data['error'] = task.get('error', 'Unknown error')
-        status_data['log'] = f"Task failed: {task.get('error', 'Unknown error')}"
-        status_data['percentage'] = 100
-    elif task['status'] == 'cancelled':
-        status_data['log'] = 'Task cancelled by user'
-        status_data['percentage'] = 100
+def get_task_status(task_id):
+    """Get task status and progress."""
+    try:
+        logger_handler.log_request('GET', f'/web/status/{task_id}')
+        
+        task = task_handler.get_task_status(task_id)
+        if not task:
+            logger_handler.log_error(f'Task not found: {task_id}')
+            return request_handler.create_error_response('Task not found', 404)
+        
+        response = {
+            'percentage': task.get('progress', 0),
+            'log': task.get('stage', 'Unknown'),
+            'has_detections': False  # Default to False
+        }
+        
+        # Add error if task failed
+        if task.get('status') == 'failed':
+            response['error'] = task.get('error', 'Unknown error')
+            logger_handler.log_task_status(task_id, 'failed', error=response['error'])
+            return request_handler.create_success_response(response)
+        
+        # Add download token if task completed
+        if task.get('status') == 'completed':
+            # Check if there are any detections
+            zip_path = task.get('zip_path')
+            if zip_path and os.path.exists(zip_path):
+                try:
+                    with zipfile.ZipFile(zip_path, 'r') as zf:
+                        # Look for output.json in the ZIP
+                        for filename in zf.namelist():
+                            if filename.endswith('output.json'):
+                                with zf.open(filename) as f:
+                                    content = f.read()
+                                    if content:
+                                        data = json.loads(content)
+                                        # Check if any entry has detections
+                                        response['has_detections'] = any(
+                                            len(entry.get('coordinates', [])) > 0 
+                                            for entry in data
+                                        )
+                                        break
+                except Exception as e:
+                    logger_handler.log_error(f'Error checking detections: {str(e)}')
             
-    return request_handler.create_success_response(status_data)
+            token = auth_handler.generate_download_token(task['session_id'], task_id)
+            response['download_token'] = token
+            logger_handler.log_task_status(task_id, 'completed', token=token)
+        
+        return request_handler.create_success_response(response)
+        
+    except Exception as e:
+        logger_handler.log_error(str(e), details=traceback.format_exc())
+        return request_handler.create_error_response(str(e), 500)
 
 @app.route('/download/<token>', methods=['GET'])
 def download_result(token):
@@ -356,4 +372,4 @@ logger_handler.log_system('Background threads started')
 
 if __name__ == '__main__':
     logger_handler.log_system('Starting Flask server on port 5010')
-    app.run(host='0.0.0.0', port=5010) 
+    app.run(host='0.0.0.0', port=8000) 

@@ -26,8 +26,14 @@ class RequestHandler:
         print("\n=== New Request ===")
         print("Content-Type:", request.content_type)
         print("Accept:", request.headers.get('Accept'))
-        print("Files:", request.files.keys())
-        print("Form Data:", request.form.to_dict())
+        print("\nReceived Files:")
+        for key in request.files:
+            file = request.files[key]
+            if file and file.filename:
+                print(f"- File key '{key}': {file.filename}")
+            else:
+                print(f"- Empty file for key '{key}'")
+        print("\nForm Data:", request.form.to_dict())
         print("Raw Data:", request.get_data())
         print("Is JSON?", request.is_json)
         print("JSON Data:", request.get_json(silent=True))
@@ -60,30 +66,50 @@ class RequestHandler:
             zip_found = False
             
             # Check all uploaded files
+            print("\nProcessing uploaded files:")
             for key in request.files:
                 file = request.files[key]
                 if not file or not file.filename:
                     continue
-                    
+                
+                print(f"Processing file: {file.filename}")
+                
                 if not self.file_handler.allowed_file(file.filename, input_type):
                     raise ValueError(f'Invalid file type: {file.filename}')
-                    
+                
                 ext = file.filename.rsplit('.', 1)[1].lower()
+                print(f"File extension: {ext}")
+                
                 if ext == 'zip':
+                    print("ZIP file found")
                     zip_found = True
                     files = [file]  # If ZIP file found, use only that
                     break  # No need to check other files
                 elif ext == 'jpg':
+                    print("JPG file found")
                     jpg_found = True
-                elif ext == 'jgw':
-                    jgw_found = True
-                    
-                if not zip_found:
                     files.append(file)
+                elif ext == 'jgw':
+                    print("JGW file found")
+                    jgw_found = True
+                    files.append(file)
+            
+            print(f"\nValidation summary:")
+            print(f"ZIP found: {zip_found}")
+            print(f"JPG found: {jpg_found}")
+            print(f"JGW found: {jgw_found}")
+            print(f"Total files to process: {len(files)}")
             
             # Validate we have either a ZIP file or both JPG and JGW files
             if not zip_found and not (jpg_found and jgw_found):
-                raise ValueError('Either a ZIP file or both JPG and JGW files are required for custom data')
+                error_msg = []
+                if not zip_found and not jpg_found and not jgw_found:
+                    error_msg.append("No valid files uploaded")
+                elif not jpg_found:
+                    error_msg.append("JPG file is missing")
+                elif not jgw_found:
+                    error_msg.append("JGW file is missing")
+                raise ValueError(f"Upload error: {', '.join(error_msg)}")
         
         # Get parameters based on content type
         if request.content_type == 'application/json':
