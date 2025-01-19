@@ -63,10 +63,7 @@ demo_test.py
 *.a
 *.exe
 *.bin
-*.pt
-*.pth
 *.onnx
-*.mlmodel
 *.tflite
 *.pb
 

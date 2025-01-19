@@ -110,9 +110,39 @@ def prediction(predictionThreshold=0.25, saveLabeledImage=False, outputType="0",
         print("JSON content:")
         print(json.dumps(jsonOutput, indent=2))
         
-        with open(jsonPath, 'w') as file:
-            json.dump(jsonOutput, file, indent=2)
-        print(f"JSON file size: {os.path.getsize(jsonPath)} bytes")
+        # Validate JSON content before writing
+        if not jsonOutput:
+            print("WARNING: No detections found in any processed images")
+            jsonOutput = [{"image": f"{img}.jpg", "coordinates": [], "confidence": []} for img in processedImages]
+            print("Creating empty entries for all processed images")
+        
+        try:
+            with open(jsonPath, 'w') as file:
+                json.dump(jsonOutput, file, indent=2)
+            
+            # Verify the file was written correctly
+            if os.path.exists(jsonPath):
+                file_size = os.path.getsize(jsonPath)
+                print(f"JSON file size: {file_size} bytes")
+                
+                # Read back and validate content
+                with open(jsonPath, 'r') as file:
+                    content = file.read()
+                    if not content:
+                        print("ERROR: File is empty after writing")
+                    else:
+                        try:
+                            parsed = json.loads(content)
+                            print(f"Successfully verified JSON content with {len(parsed)} entries")
+                            for entry in parsed:
+                                print(f"Entry for {entry['image']}: {len(entry['coordinates'])} detections")
+                        except json.JSONDecodeError as e:
+                            print(f"ERROR: Invalid JSON content: {e}")
+            else:
+                print("ERROR: File was not created")
+        except Exception as e:
+            print(f"ERROR writing JSON file: {e}")
+            raise
     else:
         # Save as TXT files
         for originalImage, coordAndConf in sorted(imageDetections.items()):  # Sort for consistent output
