@@ -10,6 +10,7 @@ from datetime import datetime, timedelta
 import traceback
 import zipfile
 from utils.compress import compress_folder_to_zip
+from utils.api.logger_handler import LoggerHandler
 
 class TaskHandler:
     """Handles task processing, queuing, and cleanup."""
@@ -28,21 +29,27 @@ class TaskHandler:
         self.task_lock = threading.Lock()
         self.cancelled_tasks = set()  # Track cancelled tasks
         
+        # Initialize logger
+        self.logger = LoggerHandler()
+        
         # Create base directories
         for folder in [self.BASE_UPLOAD_FOLDER, self.BASE_OUTPUT_FOLDER]:
             if not os.path.exists(folder):
                 os.makedirs(folder)
+                self.logger.log_system(f'Created base directory: {folder}')
     
     def add_task(self, task_data):
         """Add a new task to active tasks."""
         task_id = str(uuid.uuid4())
         with self.task_lock:
             self.active_tasks[task_id] = task_data
+            self.logger.log_task_status(task_id, 'created', stage='Task created')
         return task_id
     
     def queue_task(self, task):
         """Add a task to the processing queue."""
         self.task_queue.put(task)
+        self.logger.log_task_status(task['id'], 'queued', stage='Added to processing queue')
     
     def get_task_status(self, task_id):
         """Get the status of a task."""
@@ -50,183 +57,174 @@ class TaskHandler:
             return self.active_tasks.get(task_id)
     
     def cancel_task(self, task_id):
-        """Cancel a task if it's still running or queued.
-        
-        Args:
-            task_id (str): The ID of the task to cancel
-            
-        Returns:
-            bool: True if task was cancelled, False if task not found or already completed
-        """
+        """Cancel a task if it's still running or queued."""
         with self.task_lock:
             task = self.active_tasks.get(task_id)
             if not task:
+                self.logger.log_error(f'Task not found for cancellation: {task_id}')
                 return False
-                
-            # Can only cancel tasks that are queued or processing
+            
             if task['status'] not in ['queued', 'processing']:
+                self.logger.log_error(f'Cannot cancel task {task_id} in status: {task["status"]}')
                 return False
-                
-            # Mark task as cancelled
+            
             self.cancelled_tasks.add(task_id)
             task['status'] = 'cancelled'
             task['stage'] = 'Cancelled by user'
             task['progress'] = 100
             
-            # Clean up task resources
             input_folder = task.get('input_folder')
             if input_folder and os.path.exists(input_folder):
                 try:
                     shutil.rmtree(input_folder)
-                    print(f"Cleaned up input folder for cancelled task: {input_folder}")
+                    self.logger.log_cleanup('input_folder', input_folder)
                 except Exception as e:
-                    print(f"Error cleaning up input folder: {str(e)}")
+                    self.logger.log_error(f'Error cleaning up input folder: {str(e)}')
             
-            print(f"Task {task_id} cancelled successfully")
+            self.logger.log_task_status(task_id, 'cancelled', progress=100, stage='Cancelled by user')
             return True
     
     def process_task(self, task_id, input_folder, params, execute_func):
         """Process a single task and update its status."""
         output_folder = None
         try:
-            # Check if task was cancelled
             if task_id in self.cancelled_tasks:
-                print(f"Task {task_id} was cancelled, skipping processing")
+                self.logger.log_task_status(task_id, 'cancelled', stage='Task was cancelled before processing')
                 return None
-                
-            print(f"\n=== Processing Task {task_id} ===")
-            print("Input Folder:", input_folder)
-            print("Raw Parameters:", params)
             
-            # Get session_id from input folder path
+            self.logger.log_task_status(task_id, 'processing', progress=0, stage='Starting processing')
+            
             session_id = os.path.basename(input_folder)
-            print("Session ID:", session_id)
+            self.logger.log_system(f'Processing task {task_id} for session {session_id}')
             
-            # Initialize task (5%)
             if task_id:
                 with self.task_lock:
-                    # Check again for cancellation
                     if task_id in self.cancelled_tasks:
-                        print(f"Task {task_id} was cancelled during initialization")
+                        self.logger.log_task_status(task_id, 'cancelled', stage='Task was cancelled during initialization')
                         return None
-                        
+                    
                     self.active_tasks[task_id]['status'] = 'processing'
                     self.active_tasks[task_id]['progress'] = 5
                     self.active_tasks[task_id]['stage'] = 'Initializing model and parameters'
                     self.active_tasks[task_id]['session_id'] = session_id
             
-            # Convert parameters and execute model
-            output_type = int(str(params.get('output_type', '0')))
-            input_type = int(str(params.get('input_type', '0')))
-            classification_threshold = float(str(params.get('classification_threshold', '0.35')))
-            prediction_threshold = float(str(params.get('prediction_threshold', '0.5')))
-            save_labeled_image = str(params.get('save_labeled_image', 'false')).lower() == 'true'
-            yolo_model_type = str(params.get('yolo_model_type', 'n'))
+            # Convert and log parameters
+            params_log = {
+                'output_type': int(str(params.get('output_type', '0'))),
+                'input_type': int(str(params.get('input_type', '0'))),
+                'classification_threshold': float(str(params.get('classification_threshold', '0.35'))),
+                'prediction_threshold': float(str(params.get('prediction_threshold', '0.5'))),
+                'save_labeled_image': str(params.get('save_labeled_image', 'false')).lower() == 'true',
+                'yolo_model_type': str(params.get('yolo_model_type', 'n'))
+            }
+            self.logger.log_system(f'Task {task_id} parameters: {params_log}')
             
             # Execute model
             output_folder = execute_func(
                 input_folder,
-                input_type,
-                classification_threshold,
-                prediction_threshold,
-                save_labeled_image,
-                output_type,
-                yolo_model_type
+                params_log['input_type'],
+                params_log['classification_threshold'],
+                params_log['prediction_threshold'],
+                params_log['save_labeled_image'],
+                params_log['output_type'],
+                params_log['yolo_model_type']
             )
             
             if not output_folder or not os.path.exists(output_folder):
                 raise Exception("Output folder not found or not returned by model execution")
             
-            # Create ZIP file (95%)
+            self.logger.log_file_operation('CREATE', output_folder)
+            
             if task_id:
                 with self.task_lock:
                     self.active_tasks[task_id]['progress'] = 95
                     self.active_tasks[task_id]['stage'] = 'Creating ZIP file'
             
-            # Create ZIP file for output
+            # Create ZIP file
             zip_name = f"{os.path.basename(output_folder)}.zip"
             zip_path = os.path.join(os.path.dirname(output_folder), zip_name)
             
-            print("\n=== Creating ZIP File ===")
-            print(f"Output folder: {output_folder}")
-            print(f"Contents: {os.listdir(output_folder)}")
-            print(f"ZIP path: {zip_path}")
+            self.logger.log_system(f'Creating ZIP file for task {task_id}')
             
-            # Create ZIP file
             if os.path.exists(zip_path):
                 os.remove(zip_path)
-                
+                self.logger.log_cleanup('old_zip', zip_path)
+            
             with zipfile.ZipFile(zip_path, 'w', zipfile.ZIP_DEFLATED) as zipf:
                 for root, _, files in os.walk(output_folder):
                     for file in files:
                         file_path = os.path.join(root, file)
                         arcname = os.path.relpath(file_path, output_folder)
-                        print(f"Adding to ZIP: {arcname}")
+                        self.logger.log_file_operation('ZIP_ADD', arcname)
                         zipf.write(file_path, arcname)
             
             # Verify ZIP file
             if not os.path.exists(zip_path):
                 raise Exception("ZIP file was not created")
-                
+            
             if os.path.getsize(zip_path) == 0:
                 raise Exception("Created ZIP file is empty")
-                
+            
             with zipfile.ZipFile(zip_path, 'r') as zf:
                 contents = zf.namelist()
                 if not contents:
                     raise Exception("ZIP file has no contents")
-                print(f"ZIP contents: {contents}")
+                self.logger.log_file_operation('ZIP_VERIFY', zip_path, details=f"Files: {contents}")
                 
-                # Test ZIP integrity
                 if zf.testzip() is not None:
                     raise Exception("ZIP file is corrupted")
             
-            print(f"ZIP file created successfully: {zip_path}")
-            print(f"ZIP file size: {os.path.getsize(zip_path)} bytes")
+            self.logger.log_file_operation('ZIP_CREATE', zip_path, details=f"Size: {os.path.getsize(zip_path)} bytes")
             
             # Remove original output folder
             shutil.rmtree(output_folder)
+            self.logger.log_cleanup('output_folder', output_folder)
             
-            # Update task status (100%)
+            # Update task status
             if task_id:
                 with self.task_lock:
                     self.active_tasks[task_id]['status'] = 'completed'
                     self.active_tasks[task_id]['progress'] = 100
                     self.active_tasks[task_id]['stage'] = 'Completed'
                     self.active_tasks[task_id]['zip_path'] = zip_path
+                    self.logger.log_task_status(task_id, 'completed', progress=100, stage='Completed')
             
             return task_id
             
         except Exception as e:
-            print(f"Error in process_task: {str(e)}")
+            self.logger.log_error(f'Error in process_task: {str(e)}', details=traceback.format_exc())
             if task_id:
                 with self.task_lock:
                     self.active_tasks[task_id]['status'] = 'failed'
                     self.active_tasks[task_id]['error'] = str(e)
                     self.active_tasks[task_id]['stage'] = 'Failed'
+                    self.logger.log_task_status(task_id, 'failed', error=str(e))
             
-            # Clean up
             if output_folder and os.path.exists(output_folder):
                 shutil.rmtree(output_folder)
+                self.logger.log_cleanup('failed_output', output_folder)
             
             raise
     
     def queue_processor(self, execute_func):
         """Process tasks from the queue."""
+        self.logger.log_system('Queue processor started')
         while True:
             task = None
             try:
                 task = self.task_queue.get()
                 if task is None:  # Shutdown signal
+                    self.logger.log_system('Queue processor received shutdown signal')
                     break
                 
+                self.logger.log_system(f'Processing queued task: {task["id"]}')
                 self.process_task(task['id'], task['input_folder'], task['params'], execute_func)
                 self.task_queue.task_done()
-            
+                
             except queue.Empty:
                 continue
             except Exception as e:
-                print(f"Task processing error: {str(e)}")
+                self.logger.log_error(f'Task processing error: {str(e)}', details=traceback.format_exc())
                 if task:
                     with self.task_lock:
                         task_id = task['id']
@@ -234,28 +232,29 @@ class TaskHandler:
                             self.active_tasks[task_id]['status'] = 'failed'
                             self.active_tasks[task_id]['error'] = str(e)
                             self.active_tasks[task_id]['stage'] = 'Failed'
+                            self.logger.log_task_status(task_id, 'failed', error=str(e))
                 self.task_queue.task_done()
             finally:
-                # Clean up task from active_tasks after MAX_FILE_AGE_HOURS
                 if task:
                     task_id = task['id']
                     def cleanup_task():
-                        time.sleep(self.MAX_FILE_AGE_HOURS * 3600)  # Convert hours to seconds
+                        time.sleep(self.MAX_FILE_AGE_HOURS * 3600)
                         with self.task_lock:
                             if task_id in self.active_tasks:
                                 del self.active_tasks[task_id]
-                                print(f"Cleaned up task {task_id} from active tasks")
+                                self.logger.log_cleanup('task_data', f'Task {task_id}')
                     
                     cleanup_thread = threading.Thread(target=cleanup_task, daemon=True)
                     cleanup_thread.start()
     
     def cleanup_old_files(self):
         """Clean up files older than MAX_FILE_AGE_HOURS for input and MAX_OUTPUT_AGE_HOURS for output."""
+        self.logger.log_system('File cleanup service started')
         while True:
             try:
                 current_time = datetime.now()
                 
-                # Clean up input folders (2 hours)
+                # Clean up input folders
                 for folder in os.listdir(self.BASE_UPLOAD_FOLDER):
                     path = os.path.join(self.BASE_UPLOAD_FOLDER, folder)
                     if os.path.isdir(path):
@@ -263,30 +262,28 @@ class TaskHandler:
                             folder_time = datetime.strptime(folder.split('_')[0] + '_' + folder.split('_')[1], '%Y%m%d_%H%M%S')
                             if current_time - folder_time > timedelta(hours=self.MAX_FILE_AGE_HOURS):
                                 shutil.rmtree(path)
-                                print(f"Cleaned up input folder: {path}")
+                                self.logger.log_cleanup('old_input', path)
                         except (ValueError, IndexError):
                             continue
                 
-                # Clean up output folders and ZIP files (4 hours)
+                # Clean up output folders and ZIP files
                 for item in os.listdir(self.BASE_OUTPUT_FOLDER):
                     path = os.path.join(self.BASE_OUTPUT_FOLDER, item)
                     try:
-                        # Parse the timestamp from the name
                         timestamp = item.split('_')[0] + '_' + item.split('_')[1]
                         folder_time = datetime.strptime(timestamp, '%Y%m%d_%H%M%S')
                         
-                        # Check if item is old enough to clean up (4 hours for both folders and zips)
                         if current_time - folder_time > timedelta(hours=self.MAX_OUTPUT_AGE_HOURS):
                             if os.path.isdir(path):
                                 shutil.rmtree(path)
-                                print(f"Cleaned up old output folder: {path}")
+                                self.logger.log_cleanup('old_output_folder', path)
                             elif item.endswith('.zip'):
                                 os.remove(path)
-                                print(f"Cleaned up old ZIP file: {path}")
+                                self.logger.log_cleanup('old_zip', path)
                     except (ValueError, IndexError):
                         continue
             
             except Exception as e:
-                print(f"Cleanup error: {str(e)}")
+                self.logger.log_error(f'Cleanup error: {str(e)}', details=traceback.format_exc())
             
             time.sleep(1800)  # Run every 30 minutes 

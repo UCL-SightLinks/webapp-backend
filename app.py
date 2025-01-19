@@ -34,11 +34,10 @@ Base URL: http://localhost:5010
    Description: Get task status and progress
    Response:
    {
-     "status": "queued|processing|completed|failed",
-     "progress": 0-100,
-     "stage": "current_stage",
-     "download_token": "token" (when completed),
-     "error": "error_message" (if failed)
+     "percentage": 0-100,           # Progress percentage
+     "log": "current_stage",        # Current stage or status message
+     "download_token": "token",     # Only included when task is completed
+     "error": "error_message"       # Only included when task has failed
    }
 
 4. Download Results
@@ -47,12 +46,27 @@ Base URL: http://localhost:5010
    Description: Download processed results using token
    Response: ZIP file containing results
 
+5. Cancel Task
+   Endpoint: /web/cancel/<task_id>
+   Method: POST
+   Description: Cancel a running or queued task
+   Response:
+   {
+     "status": "success",
+     "message": "Task cancelled successfully"
+   }
+   Error Response:
+   {
+     "error": "Task not found or already completed"
+   }
+
 Notes:
 - All uploads must be ZIP files
-- Files are automatically cleaned up after 2 hours
-- ZIP files are kept for 4 hours
+- Input files are automatically cleaned up after 2 hours
+- Output ZIP files are kept for 4 hours
 - Progress updates are provided in real-time
-- Failed tasks include error messages
+- Failed tasks include error messages in status response
+- Cancelled tasks can't be resumed
 """
 
 from flask import Flask, request, send_file
@@ -67,6 +81,7 @@ from utils.api.task_handler import TaskHandler
 from utils.api.auth_handler import AuthHandler
 from utils.api.file_handler import FileHandler
 from utils.api.request_handler import RequestHandler
+from utils.api.logger_handler import LoggerHandler
 
 app = Flask(__name__)
 # Enable CORS for all origins
@@ -84,29 +99,39 @@ file_handler = FileHandler()
 auth_handler = AuthHandler()
 task_handler = TaskHandler()
 request_handler = RequestHandler(file_handler)
+logger_handler = LoggerHandler()
 
 @app.route('/api/predict', methods=['POST'])
 def predict_api():
     """Direct API endpoint that waits for completion"""
     try:
+        logger_handler.log_request('POST', '/api/predict')
+        
         # Parse request
-        file, params = request_handler.parse_request_parameters(request)
+        files, params = request_handler.parse_request_parameters(request)
+        logger_handler.log_request('POST', '/api/predict', params=params)
         
         # Create session folders
         session_id, input_folder = file_handler.create_session_folders()
+        logger_handler.log_file_operation('CREATE_SESSION', input_folder)
         
-        # Save file
-        filepath = request_handler.save_uploaded_file(file, input_folder)
+        # Save files
+        filepaths = request_handler.save_uploaded_files(files, input_folder)
+        for filepath in filepaths:
+            logger_handler.log_file_operation('SAVE', filepath)
         
         # Process directly
         task_id = task_handler.process_task(None, input_folder, params, execute)
         
         # Get task result
         task = task_handler.get_task_status(task_id)
+        logger_handler.log_task_status(task_id, task['status'], error=task.get('error'))
         
         if task['status'] == 'failed':
+            logger_handler.log_error(task['error'])
             return request_handler.create_error_response(task['error'], 500)
-            
+        
+        logger_handler.log_file_operation('SEND', task['zip_path'])
         # Return response based on client preference
         if request_handler.wants_json_response(request):
             return request_handler.create_success_response({
@@ -118,36 +143,47 @@ def predict_api():
             return file_handler.send_file_response(task['zip_path'])
             
     except ValueError as ve:
+        logger_handler.log_error(str(ve))
         return request_handler.create_error_response(str(ve), 400)
     except Exception as e:
+        logger_handler.log_error(str(e), details=traceback.format_exc())
         return request_handler.create_error_response(str(e), 500)
 
 @app.route('/web/predict', methods=['POST'])
 def predict_web():
     """Web endpoint with queuing and progress tracking"""
     try:
+        logger_handler.log_request('POST', '/web/predict')
+        
         # Parse request
-        file, params = request_handler.parse_request_parameters(request)
+        files, params = request_handler.parse_request_parameters(request)
+        logger_handler.log_request('POST', '/web/predict', params=params)
         
         # Check queue size
         if task_handler.task_queue.full():
+            logger_handler.log_error('Server busy', details='Queue is full')
             return request_handler.create_error_response('Server is busy. Please try again later.', 503)
         
         # Create session folders
         session_id, input_folder = file_handler.create_session_folders()
+        logger_handler.log_file_operation('CREATE_SESSION', input_folder)
         
-        # Save file
-        filepath = request_handler.save_uploaded_file(file, input_folder)
+        # Save files
+        filepaths = request_handler.save_uploaded_files(files, input_folder)
+        for filepath in filepaths:
+            logger_handler.log_file_operation('SAVE', filepath)
         
         # Create task
-        task_id = task_handler.add_task({
+        task_data = {
             'status': 'queued',
             'progress': 0,
             'stage': 'Queued',
             'created_at': datetime.now(),
             'session_id': session_id,
             'input_folder': input_folder
-        })
+        }
+        task_id = task_handler.add_task(task_data)
+        logger_handler.log_task_status(task_id, 'queued', progress=0, stage='Queued')
         
         # Queue task
         task_handler.queue_task({
@@ -162,115 +198,110 @@ def predict_web():
         })
         
     except ValueError as ve:
-        print(f"Validation error in predict_web: {str(ve)}")
+        logger_handler.log_error(str(ve))
         return request_handler.create_error_response(str(ve), 400)
     except Exception as e:
-        print(f"Error in predict_web: {str(e)}")
-        import traceback
-        print("Traceback:", traceback.format_exc())
+        logger_handler.log_error(str(e), details=traceback.format_exc())
         return request_handler.create_error_response(str(e), 500)
 
 @app.route('/web/status/<task_id>', methods=['GET'])
 def task_status(task_id):
     """Get task status and progress"""
+    logger_handler.log_request('GET', f'/web/status/{task_id}')
+    
     task = task_handler.get_task_status(task_id)
     if not task:
+        logger_handler.log_error(f'Task not found: {task_id}')
         return request_handler.create_error_response('Task not found', 404)
-        
+    
+    logger_handler.log_task_status(
+        task_id,
+        task['status'],
+        progress=task['progress'],
+        stage=task.get('stage'),
+        error=task.get('error')
+    )
+    
     status_data = {
-        'status': task['status'],
-        'progress': task['progress'],
-        'stage': task.get('stage', '')
+        'percentage': task['progress'],
+        'log': task.get('stage', '')
     }
     
     if task['status'] == 'completed':
         if 'zip_path' in task:
-            # Get session_id from task data or use task_id as fallback
             session_id = task.get('session_id', os.path.basename(os.path.dirname(task['zip_path'])))
             token = auth_handler.generate_download_token(session_id, task_id)
             status_data['download_token'] = token
-            print(f"\n=== Token Generation ===")
-            print(f"Task ID: {task_id}")
-            print(f"Session ID: {session_id}")
-            print(f"ZIP Path: {task['zip_path']}")
-            print(f"Token Generated: {token}")
-        else:
-            status_data['error'] = 'ZIP file not found'
-            status_data['status'] = 'failed'
-            
+            status_data['percentage'] = 100
+            status_data['log'] = 'Task completed successfully'
+            logger_handler.log_system(f'Generated download token for task {task_id}')
     elif task['status'] == 'failed':
         status_data['error'] = task.get('error', 'Unknown error')
-        
+        status_data['log'] = f"Task failed: {task.get('error', 'Unknown error')}"
+        status_data['percentage'] = 100
+    elif task['status'] == 'cancelled':
+        status_data['log'] = 'Task cancelled by user'
+        status_data['percentage'] = 100
+            
     return request_handler.create_success_response(status_data)
 
 @app.route('/download/<token>', methods=['GET'])
 def download_result(token):
     """Download the result file using a valid token."""
     try:
+        logger_handler.log_request('GET', f'/download/{token}')
+        
         # Verify token
         payload = auth_handler.verify_download_token(token)
         if not payload:
+            logger_handler.log_error('Invalid download token')
             return request_handler.create_error_response('Invalid token', 401)
-            
-        # Get task status to find the zip file path
+        
         task_id = payload.get('task_id')
         if not task_id:
+            logger_handler.log_error('Invalid token payload - missing task_id')
             return request_handler.create_error_response('Invalid token payload', 401)
-            
+        
         task = task_handler.get_task_status(task_id)
         if not task:
+            logger_handler.log_error(f'Task not found for download: {task_id}')
             return request_handler.create_error_response('Task not found', 404)
-            
-        print(f"\n=== Download Request Details ===")
-        print(f"Task ID: {task_id}")
-        print(f"Task Status: {task.get('status')}")
-        print(f"Task Data: {task}")
         
         # Get and verify zip path
         zip_path = task.get('zip_path')
         if not zip_path:
+            logger_handler.log_error(f'ZIP path not found for task: {task_id}')
             return request_handler.create_error_response('ZIP path not found in task data', 404)
-            
+        
         if not os.path.exists(zip_path):
+            logger_handler.log_error(f'ZIP file not found at path: {zip_path}')
             return request_handler.create_error_response(f'ZIP file not found at path: {zip_path}', 404)
-            
+        
         file_size = os.path.getsize(zip_path)
         if file_size == 0:
+            logger_handler.log_error(f'Empty ZIP file: {zip_path}')
             return request_handler.create_error_response('ZIP file is empty', 404)
-            
-        print(f"ZIP Path: {zip_path}")
-        print(f"File exists: Yes")
-        print(f"File size: {file_size} bytes")
+        
+        logger_handler.log_file_operation('VERIFY', zip_path)
         
         # Verify zip file integrity
         try:
             with zipfile.ZipFile(zip_path, 'r') as zf:
                 contents = zf.namelist()
-                print(f"ZIP contents: {contents}")
-                
-                # Get detailed file info
-                for name in contents:
-                    info = zf.getinfo(name)
-                    print(f"File: {name}")
-                    print(f"  Size: {info.file_size} bytes")
-                    print(f"  Compressed: {info.compress_size} bytes")
-                
                 if zf.testzip() is not None:
+                    logger_handler.log_error(f'Corrupted ZIP file: {zip_path}')
                     return request_handler.create_error_response('ZIP file is corrupted', 500)
-                    
                 if not contents:
+                    logger_handler.log_error(f'Empty ZIP file contents: {zip_path}')
                     return request_handler.create_error_response('ZIP file has no contents', 500)
-        except zipfile.BadZipFile as e:
-            return request_handler.create_error_response(f'Invalid ZIP file: {str(e)}', 500)
+                logger_handler.log_file_operation('ZIP_CONTENTS', zip_path, details=f"Files: {contents}")
         except Exception as e:
+            logger_handler.log_error(f'ZIP verification failed: {str(e)}')
             return request_handler.create_error_response(f'Error verifying ZIP file: {str(e)}', 500)
         
-        print("\n=== Sending File ===")
-        print(f"File: {zip_path}")
-        print(f"Size: {file_size} bytes")
-        print(f"Contents: {contents}")
+        logger_handler.log_file_operation('DOWNLOAD', zip_path)
         
-        # Always send file for download endpoint
+        # Send file
         try:
             response = send_file(
                 zip_path,
@@ -281,41 +312,48 @@ def download_result(token):
             response.headers['Content-Length'] = file_size
             response.headers['Content-Type'] = 'application/zip'
             response.headers['Content-Disposition'] = 'attachment; filename=result.zip'
-            print("File sending initiated successfully")
+            logger_handler.log_system(f'File download initiated: {zip_path}')
             return response
         except Exception as e:
-            print(f"Error sending file: {str(e)}")
+            logger_handler.log_error(f'File send failed: {str(e)}')
             return request_handler.create_error_response(f'Error sending file: {str(e)}', 500)
             
     except Exception as e:
-        print(f"Download error: {str(e)}")
-        print("Traceback:", traceback.format_exc())
+        logger_handler.log_error(str(e), details=traceback.format_exc())
         return request_handler.create_error_response(str(e), 500)
 
 @app.route('/web/cancel/<task_id>', methods=['POST'])
 def cancel_task(task_id):
     """Cancel a running or queued task"""
     try:
+        logger_handler.log_request('POST', f'/web/cancel/{task_id}')
+        
         # Try to cancel the task
         cancelled = task_handler.cancel_task(task_id)
         if cancelled:
+            logger_handler.log_task_status(task_id, 'cancelled', stage='Cancelled by user')
             return request_handler.create_success_response({
                 'status': 'success',
                 'message': 'Task cancelled successfully'
             })
         else:
+            logger_handler.log_error(f'Task cancel failed: {task_id}')
             return request_handler.create_error_response('Task not found or already completed', 404)
             
     except Exception as e:
-        print(f"Error cancelling task: {str(e)}")
+        logger_handler.log_error(str(e), details=traceback.format_exc())
         return request_handler.create_error_response(str(e), 500)
 
 # Start background threads
+logger_handler.log_system('Starting background threads')
 cleanup_thread = threading.Thread(target=task_handler.cleanup_old_files, daemon=True)
 cleanup_thread.start()
 
 queue_thread = threading.Thread(target=task_handler.queue_processor, args=(execute,), daemon=True)
 queue_thread.start()
 
+logger_handler.log_system('Background threads started')
+
 if __name__ == '__main__':
+    logger_handler.log_system('Starting Flask server on port 5010')
     app.run(host='0.0.0.0', port=5010) 
