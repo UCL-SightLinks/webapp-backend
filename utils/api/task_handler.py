@@ -32,6 +32,18 @@ class TaskHandler:
         self.cancelled_tasks = set()  # Track cancelled tasks
         self.task_events = {}  # Track cancellation events for each task
         
+        # Server statistics
+        self.stats = {
+            'total_tasks_processed': 0,
+            'total_files_processed': 0,
+            'failed_tasks': 0,
+            'cancelled_tasks': 0,
+            'start_time': datetime.now(),
+            'current_tasks': 0,
+            'queued_tasks': 0
+        }
+        self.stats_lock = threading.Lock()
+        
         # Thread pool for parallel processing
         self.thread_pool = ThreadPoolExecutor(max_workers=self.MAX_CONCURRENT_TASKS)
         self.processing_tasks = set()  # Track currently processing tasks
@@ -44,6 +56,45 @@ class TaskHandler:
             if not os.path.exists(folder):
                 os.makedirs(folder)
                 self.logger.log_system(f'Created base directory: {folder}')
+    
+    def update_stats(self, stat_key, value=1, increment=True):
+        """Update server statistics."""
+        with self.stats_lock:
+            if increment:
+                self.stats[stat_key] += value
+            else:
+                self.stats[stat_key] = value
+    
+    def get_server_status(self):
+        """Get current server status and statistics."""
+        with self.stats_lock:
+            status = self.stats.copy()
+            status.update({
+                'uptime_seconds': (datetime.now() - status['start_time']).total_seconds(),
+                'max_concurrent_tasks': self.MAX_CONCURRENT_TASKS,
+                'max_queue_size': self.MAX_QUEUE_SIZE,
+                'memory_usage_mb': self._get_memory_usage(),
+                'cpu_usage_percent': self._get_cpu_usage()
+            })
+            return status
+    
+    def _get_memory_usage(self):
+        """Get current memory usage in MB."""
+        try:
+            import psutil
+            process = psutil.Process(os.getpid())
+            return process.memory_info().rss / 1024 / 1024
+        except:
+            return 0
+    
+    def _get_cpu_usage(self):
+        """Get current CPU usage percentage."""
+        try:
+            import psutil
+            process = psutil.Process(os.getpid())
+            return process.cpu_percent()
+        except:
+            return 0
     
     def can_accept_task(self):
         """Check if we can accept a new task."""
@@ -63,6 +114,7 @@ class TaskHandler:
     def queue_task(self, task):
         """Add a task to the processing queue."""
         self.task_queue.put(task)
+        self.update_stats('queued_tasks', 1)
         self.logger.log_task_status(task['id'], 'queued', stage='Added to processing queue')
     
     def get_task_status(self, task_id):
@@ -127,6 +179,7 @@ class TaskHandler:
     
     def process_task(self, task_id, input_folder, params, execute_func):
         """Process a single task and update its status."""
+        self.update_stats('current_tasks', 1)
         output_folder = None
         try:
             if self.check_cancellation(task_id):
@@ -288,9 +341,22 @@ class TaskHandler:
                     self.active_tasks[task_id]['zip_path'] = zip_path
                     self.logger.log_task_status(task_id, 'completed', progress=100, stage='Task completed successfully')
             
+            # Update statistics when task completes successfully
+            self.update_stats('total_tasks_processed', 1)
+            self.update_stats('current_tasks', -1)
+            self.update_stats('queued_tasks', -1)
+            
             return task_id
             
         except Exception as e:
+            # Update statistics on failure
+            if self.check_cancellation(task_id):
+                self.update_stats('cancelled_tasks', 1)
+            else:
+                self.update_stats('failed_tasks', 1)
+            self.update_stats('current_tasks', -1)
+            self.update_stats('queued_tasks', -1)
+            
             self.logger.log_error(f'Task processing failed: {str(e)}')
             if task_id:
                 with self.task_lock:

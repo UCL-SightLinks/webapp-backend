@@ -64,8 +64,18 @@ def execute(uploadDir = "input", inputType = "0", classificationThreshold = 0.35
         if cancellation_check and cancellation_check():
             raise Exception("Task cancelled by user")
             
-        # Run segmentation
-        boundBoxSegmentation(classificationThreshold, outputFolder, extractDir)
+        # Define segmentation progress callback
+        def segmentation_progress_callback(current, total):
+            if progress_callback:
+                # Scale progress from 20 to 40 based on segmentation progress
+                progress = 20 + (current / total * 20)
+                progress_callback(f"Segmenting image {current}/{total}", int(progress))
+                
+            if cancellation_check and cancellation_check():
+                raise Exception("Task cancelled by user")
+            
+        # Run segmentation with progress tracking
+        boundBoxSegmentation(classificationThreshold, outputFolder, extractDir, segmentation_progress_callback)
         
         if progress_callback:
             progress_callback("Image segmentation completed", 40)

@@ -1,7 +1,7 @@
 """
 API Documentation
 
-Base URL: http://localhost:5010
+Base URL: http://localhost:8000
 
 1. Direct Processing API
    Endpoint: /api/predict
@@ -58,6 +58,25 @@ Base URL: http://localhost:5010
    Error Response:
    {
      "error": "Task not found or already completed"
+   }
+
+6. Server Status
+   Endpoint: /api/server-status
+   Method: GET
+   Description: Get current server status and statistics
+   Response:
+   {
+     "total_tasks_processed": int,      # Total number of tasks processed
+     "total_files_processed": int,      # Total number of files processed
+     "failed_tasks": int,               # Number of failed tasks
+     "cancelled_tasks": int,            # Number of cancelled tasks
+     "current_tasks": int,              # Number of currently processing tasks
+     "queued_tasks": int,               # Number of tasks in queue
+     "uptime_seconds": float,           # Server uptime in seconds
+     "max_concurrent_tasks": int,       # Maximum allowed concurrent tasks
+     "max_queue_size": int,             # Maximum queue size
+     "memory_usage_mb": float,          # Current memory usage in MB
+     "cpu_usage_percent": float         # Current CPU usage percentage
    }
 
 Notes:
@@ -357,6 +376,17 @@ def cancel_task(task_id):
             logger_handler.log_error(f'Task cancel failed: {task_id}')
             return request_handler.create_error_response('Task not found or already completed', 404)
             
+    except Exception as e:
+        logger_handler.log_error(str(e), details=traceback.format_exc())
+        return request_handler.create_error_response(str(e), 500)
+
+@app.route('/api/server-status', methods=['GET'])
+def get_server_status():
+    """Get current server status and statistics."""
+    try:
+        logger_handler.log_request('GET', '/api/server-status')
+        status = task_handler.get_server_status()
+        return request_handler.create_success_response(status)
     except Exception as e:
         logger_handler.log_error(str(e), details=traceback.format_exc())
         return request_handler.create_error_response(str(e), 500)
