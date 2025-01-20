@@ -69,15 +69,19 @@ class LoggerHandler:
             message += f" | Error: {error}"
         self.logger.info(message)
     
-    def log_task_status(self, task_id, status, progress=None, stage=None, error=None):
+    def log_task_status(self, task_id, status, progress=None, stage=None, error=None, **kwargs):
         """Log task status changes."""
-        message = f"TASK {task_id}: Status={status}"
-        if progress is not None:
-            message += f" | Progress={progress}%"
-        if stage:
-            message += f" | Stage='{stage}'"
-        if error:
-            message += f" | Error='{error}'"
+        message = f"Task {task_id} status: {status}"
+        details = {
+            'task_id': task_id,
+            'status': status,
+            'progress': progress,
+            'stage': stage,
+            'error': error,
+            **kwargs  # Include any additional parameters
+        }
+        # Filter out None values
+        details = {k: v for k, v in details.items() if v is not None}
         self.logger.info(message)
     
     def log_file_operation(self, operation, filepath, success=True, error=None, details=None):

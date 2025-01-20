@@ -77,6 +77,7 @@ import os
 from datetime import datetime
 import zipfile
 import json
+import traceback
 
 from utils.api.task_handler import TaskHandler
 from utils.api.auth_handler import AuthHandler
@@ -253,7 +254,7 @@ def get_task_status(task_id):
             
             token = auth_handler.generate_download_token(task['session_id'], task_id)
             response['download_token'] = token
-            logger_handler.log_task_status(task_id, 'completed', token=token)
+            logger_handler.log_task_status(task_id, 'completed', stage='Processing completed')
         
         return request_handler.create_success_response(response)
         

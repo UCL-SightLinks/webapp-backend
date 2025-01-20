@@ -9,6 +9,7 @@ import uuid
 from datetime import datetime, timedelta
 import traceback
 import zipfile
+from concurrent.futures import ThreadPoolExecutor, Future
 from utils.compress import compress_folder_to_zip
 from utils.api.logger_handler import LoggerHandler
 
@@ -22,12 +23,18 @@ class TaskHandler:
         self.MAX_FILE_AGE_HOURS = 2  # For input files
         self.MAX_OUTPUT_AGE_HOURS = 4  # For output files and zips
         self.MAX_QUEUE_SIZE = 10
+        self.MAX_CONCURRENT_TASKS = 5
         
         # Task queue and tracking
         self.task_queue = queue.Queue(maxsize=self.MAX_QUEUE_SIZE)
         self.active_tasks = {}
         self.task_lock = threading.Lock()
         self.cancelled_tasks = set()  # Track cancelled tasks
+        self.task_events = {}  # Track cancellation events for each task
+        
+        # Thread pool for parallel processing
+        self.thread_pool = ThreadPoolExecutor(max_workers=self.MAX_CONCURRENT_TASKS)
+        self.processing_tasks = set()  # Track currently processing tasks
         
         # Initialize logger
         self.logger = LoggerHandler()
@@ -38,11 +45,18 @@ class TaskHandler:
                 os.makedirs(folder)
                 self.logger.log_system(f'Created base directory: {folder}')
     
+    def can_accept_task(self):
+        """Check if we can accept a new task."""
+        with self.task_lock:
+            return len(self.processing_tasks) < self.MAX_CONCURRENT_TASKS
+    
     def add_task(self, task_data):
         """Add a new task to active tasks."""
         task_id = str(uuid.uuid4())
         with self.task_lock:
             self.active_tasks[task_id] = task_data
+            # Create cancellation event for the task
+            self.task_events[task_id] = threading.Event()
             self.logger.log_task_status(task_id, 'created', stage='Task created')
         return task_id
     
@@ -68,11 +82,23 @@ class TaskHandler:
                 self.logger.log_error(f'Cannot cancel task {task_id} in status: {task["status"]}')
                 return False
             
+            # Set cancellation flag and event
             self.cancelled_tasks.add(task_id)
+            if task_id in self.task_events:
+                self.task_events[task_id].set()
+            
             task['status'] = 'cancelled'
             task['stage'] = 'Cancelled by user'
             task['progress'] = 100
             
+            # Remove from processing tasks if it's being processed
+            if task_id in self.processing_tasks:
+                self.processing_tasks.remove(task_id)
+                # If there's a future associated with this task, try to cancel it
+                if 'future' in task:
+                    task['future'].cancel()
+            
+            # Clean up input and output folders
             input_folder = task.get('input_folder')
             if input_folder and os.path.exists(input_folder):
                 try:
@@ -81,34 +107,174 @@ class TaskHandler:
                 except Exception as e:
                     self.logger.log_error(f'Error cleaning up input folder: {str(e)}')
             
-            self.logger.log_task_status(task_id, 'cancelled', progress=100, stage='Cancelled by user')
+            # Clean up output folder if it exists
+            session_id = task.get('session_id')
+            if session_id:
+                output_folder = os.path.join(self.BASE_OUTPUT_FOLDER, session_id)
+                if os.path.exists(output_folder):
+                    try:
+                        shutil.rmtree(output_folder)
+                        self.logger.log_cleanup('output_folder', output_folder)
+                    except Exception as e:
+                        self.logger.log_error(f'Error cleaning up output folder: {str(e)}')
+                
+                # Clean up any associated zip files
+                zip_path = os.path.join(self.BASE_OUTPUT_FOLDER, f"{session_id}.zip")
+                if os.path.exists(zip_path):
+                    try:
+                        os.remove(zip_path)
+                        self.logger.log_cleanup('zip_file', zip_path)
+                    except Exception as e:
+                        self.logger.log_error(f'Error cleaning up zip file: {str(e)}')
+            
+            # Remove task from active tasks immediately
+            del self.active_tasks[task_id]
+            if task_id in self.task_events:
+                del self.task_events[task_id]
+            if task_id in self.cancelled_tasks:
+                self.cancelled_tasks.remove(task_id)
+            
+            self.logger.log_task_status(task_id, 'cancelled', progress=100, stage='Task cancelled and cleaned up')
             return True
     
+    def check_cancellation(self, task_id):
+        """Check if a task has been cancelled."""
+        if task_id in self.cancelled_tasks:
+            return True
+        if task_id in self.task_events and self.task_events[task_id].is_set():
+            return True
+        return False
+    
+    def count_input_files(self, input_folder):
+        """Count the number of input files that need to be processed."""
+        total_files = 0
+        for root, _, files in os.walk(input_folder):
+            for file in files:
+                if file.endswith(('.jpg', '.jgw')) and not file.startswith('._'):
+                    total_files += 1
+        return total_files // 2  # Divide by 2 since each image has both .jpg and .jgw
+
+    def count_remaining_files(self, output_folder):
+        """Count the number of remaining files to be processed in the output directory."""
+        if not os.path.exists(output_folder):
+            return 0, 0  # No files to process yet
+            
+        segmentation_remaining = 0
+        obb_remaining = 0
+        
+        # Count files in the main output directory (for segmentation)
+        for item in os.listdir(output_folder):
+            if item.endswith('.jpg') and not item.startswith('._'):
+                segmentation_remaining += 1
+        
+        # Count files in the labeledImages directory (for OBB)
+        labeled_images_dir = os.path.join(output_folder, 'labeledImages')
+        if os.path.exists(labeled_images_dir):
+            for item in os.listdir(labeled_images_dir):
+                if item.endswith('.jpg') and not item.startswith('._'):
+                    obb_remaining += 1
+        
+        return segmentation_remaining, obb_remaining
+
+    def calculate_progress(self, task_id, input_folder, output_folder, base_progress=0, stage=''):
+        """Calculate progress based on remaining files and provide detailed stage information."""
+        try:
+            with self.task_lock:
+                if task_id not in self.active_tasks:
+                    return base_progress, stage
+                    
+                total_files = self.active_tasks[task_id].get('total_files')
+                if total_files is None:
+                    total_files = self.count_input_files(input_folder)
+                    self.active_tasks[task_id]['total_files'] = total_files
+                
+                if total_files == 0:
+                    return base_progress, stage
+                
+                segmentation_remaining, obb_remaining = self.count_remaining_files(output_folder)
+                
+                # Calculate progress and update stage description
+                if base_progress < 15:
+                    # Initialization phase
+                    stage = f"Initializing and extracting files ({base_progress}%)"
+                    return base_progress, stage
+                elif base_progress < 45:
+                    # Image segmentation phase - Linear progress from 15% to 45%
+                    if segmentation_remaining == 0:
+                        # All files processed
+                        total_progress = 45
+                    else:
+                        # Calculate how many files have been processed
+                        processed = total_files - segmentation_remaining
+                        # Linear progress from 15% to 45% based on processed files
+                        total_progress = 15 + ((processed / total_files) * 30)
+                    
+                    stage = f"Segmenting aerial images: {total_files - segmentation_remaining}/{total_files} images"
+                    return total_progress, stage
+                elif base_progress < 90:
+                    # OBB detection phase - Linear progress from 45% to 90%
+                    if obb_remaining == 0 and os.path.exists(os.path.join(output_folder, 'output.json')):
+                        # All files processed and output generated
+                        total_progress = 90
+                    else:
+                        # Calculate progress based on both remaining files and output generation
+                        if obb_remaining == 0:
+                            # Files processed but output not generated yet
+                            total_progress = 85
+                        else:
+                            # Calculate based on processed files
+                            processed = total_files - obb_remaining
+                            # Linear progress from 45% to 85% based on processed files
+                            total_progress = 45 + ((processed / total_files) * 40)
+                    
+                    stage = f"Detecting oriented bounding boxes: {total_files - obb_remaining}/{total_files} images processed"
+                    return total_progress, stage
+                else:
+                    # Finalization phase - Linear progress from 90% to 100%
+                    if os.path.exists(os.path.join(output_folder, 'output.json')):
+                        # Output generated, calculate zip progress
+                        zip_name = f"{os.path.basename(output_folder)}.zip"
+                        zip_path = os.path.join(os.path.dirname(output_folder), zip_name)
+                        if os.path.exists(zip_path):
+                            total_progress = 100
+                        else:
+                            total_progress = 95
+                    else:
+                        total_progress = 90
+                    
+                    stage = f"Finalizing results: {total_files}/{total_files} images completed"
+                    return total_progress, stage
+                
+                return base_progress, stage
+        except Exception as e:
+            self.logger.log_error(f"Error calculating progress: {str(e)}")
+            return base_progress, stage
+
     def process_task(self, task_id, input_folder, params, execute_func):
         """Process a single task and update its status."""
         output_folder = None
         try:
-            if task_id in self.cancelled_tasks:
+            if self.check_cancellation(task_id):
                 self.logger.log_task_status(task_id, 'cancelled', stage='Task was cancelled before processing')
                 return None
             
-            self.logger.log_task_status(task_id, 'processing', progress=0, stage='Starting processing')
+            self.logger.log_task_status(task_id, 'processing', progress=0, stage='Starting task initialization')
             
             session_id = os.path.basename(input_folder)
             self.logger.log_system(f'Processing task {task_id} for session {session_id}')
             
             if task_id:
                 with self.task_lock:
-                    if task_id in self.cancelled_tasks:
+                    if self.check_cancellation(task_id):
                         self.logger.log_task_status(task_id, 'cancelled', stage='Task was cancelled during initialization')
                         return None
                     
                     self.active_tasks[task_id]['status'] = 'processing'
-                    self.active_tasks[task_id]['progress'] = 5
-                    self.active_tasks[task_id]['stage'] = 'Initializing model and parameters'
+                    self.active_tasks[task_id]['progress'] = 2
+                    self.active_tasks[task_id]['stage'] = 'Initializing processing environment'
                     self.active_tasks[task_id]['session_id'] = session_id
             
-            # Convert and log parameters
+            # Convert parameters to proper types
             params_log = {
                 'output_type': int(str(params.get('output_type', '0'))),
                 'input_type': int(str(params.get('input_type', '0'))),
@@ -119,7 +285,30 @@ class TaskHandler:
             }
             self.logger.log_system(f'Task {task_id} parameters: {params_log}')
             
-            # Execute model
+            # Define progress callback that uses file-based progress
+            def progress_callback(stage, base_progress):
+                if task_id:
+                    # Check for cancellation
+                    if self.check_cancellation(task_id):
+                        raise Exception("Task cancelled by user")
+                    
+                    with self.task_lock:
+                        # Calculate progress based on processed files
+                        if output_folder:
+                            progress, detailed_stage = self.calculate_progress(task_id, input_folder, output_folder, base_progress, stage)
+                        else:
+                            progress = base_progress
+                            detailed_stage = stage
+                        
+                        self.active_tasks[task_id]['progress'] = progress
+                        self.active_tasks[task_id]['stage'] = detailed_stage
+                        self.logger.log_task_status(task_id, 'processing', progress=progress, stage=detailed_stage)
+            
+            # Check for cancellation before starting execution
+            if self.check_cancellation(task_id):
+                raise Exception("Task cancelled by user")
+            
+            # Pass cancellation event to execute function
             output_folder = execute_func(
                 input_folder,
                 params_log['input_type'],
@@ -127,8 +316,13 @@ class TaskHandler:
                 params_log['prediction_threshold'],
                 params_log['save_labeled_image'],
                 params_log['output_type'],
-                params_log['yolo_model_type']
+                params_log['yolo_model_type'],
+                progress_callback
             )
+            
+            # Check for cancellation after execution
+            if self.check_cancellation(task_id):
+                raise Exception("Task cancelled by user")
             
             if not output_folder or not os.path.exists(output_folder):
                 raise Exception("Output folder not found or not returned by model execution")
@@ -137,8 +331,11 @@ class TaskHandler:
             
             if task_id:
                 with self.task_lock:
+                    total_files = self.active_tasks[task_id].get('total_files', 0)
+                    processed_files = self.count_processed_files(output_folder)
                     self.active_tasks[task_id]['progress'] = 95
-                    self.active_tasks[task_id]['stage'] = 'Creating ZIP file'
+                    self.active_tasks[task_id]['stage'] = f'Creating final ZIP archive ({processed_files}/{total_files} images completed)'
+                    self.logger.log_task_status(task_id, 'processing', progress=95, stage=f'Creating final ZIP archive ({processed_files}/{total_files} images completed)')
             
             # Create ZIP file
             zip_name = f"{os.path.basename(output_folder)}.zip"
@@ -153,87 +350,94 @@ class TaskHandler:
             with zipfile.ZipFile(zip_path, 'w', zipfile.ZIP_DEFLATED) as zipf:
                 for root, _, files in os.walk(output_folder):
                     for file in files:
+                        if self.check_cancellation(task_id):
+                            raise Exception("Task cancelled during ZIP creation")
                         file_path = os.path.join(root, file)
                         arcname = os.path.relpath(file_path, output_folder)
                         self.logger.log_file_operation('ZIP_ADD', arcname)
                         zipf.write(file_path, arcname)
             
-            # Verify ZIP file
-            if not os.path.exists(zip_path):
-                raise Exception("ZIP file was not created")
-            
-            if os.path.getsize(zip_path) == 0:
-                raise Exception("Created ZIP file is empty")
-            
-            with zipfile.ZipFile(zip_path, 'r') as zf:
-                contents = zf.namelist()
-                if not contents:
-                    raise Exception("ZIP file has no contents")
-                self.logger.log_file_operation('ZIP_VERIFY', zip_path, details=f"Files: {contents}")
-                
-                if zf.testzip() is not None:
-                    raise Exception("ZIP file is corrupted")
-            
-            self.logger.log_file_operation('ZIP_CREATE', zip_path, details=f"Size: {os.path.getsize(zip_path)} bytes")
-            
-            # Remove original output folder
-            shutil.rmtree(output_folder)
-            self.logger.log_cleanup('output_folder', output_folder)
-            
-            # Update task status
             if task_id:
                 with self.task_lock:
+                    total_files = self.active_tasks[task_id].get('total_files', 0)
+                    processed_files = self.count_processed_files(output_folder)
                     self.active_tasks[task_id]['status'] = 'completed'
                     self.active_tasks[task_id]['progress'] = 100
-                    self.active_tasks[task_id]['stage'] = 'Completed'
+                    self.active_tasks[task_id]['stage'] = f'Task completed successfully ({processed_files}/{total_files} images processed)'
                     self.active_tasks[task_id]['zip_path'] = zip_path
-                    self.logger.log_task_status(task_id, 'completed', progress=100, stage='Completed')
+                    self.logger.log_task_status(task_id, 'completed', progress=100, stage=f'Task completed successfully ({processed_files}/{total_files} images processed)')
             
             return task_id
             
         except Exception as e:
-            self.logger.log_error(f'Error in process_task: {str(e)}', details=traceback.format_exc())
+            self.logger.log_error(f'Task processing failed: {str(e)}')
             if task_id:
                 with self.task_lock:
-                    self.active_tasks[task_id]['status'] = 'failed'
-                    self.active_tasks[task_id]['error'] = str(e)
-                    self.active_tasks[task_id]['stage'] = 'Failed'
-                    self.logger.log_task_status(task_id, 'failed', error=str(e))
-            
-            if output_folder and os.path.exists(output_folder):
-                shutil.rmtree(output_folder)
-                self.logger.log_cleanup('failed_output', output_folder)
-            
-            raise
+                    if self.check_cancellation(task_id):
+                        self.active_tasks[task_id]['status'] = 'cancelled'
+                        self.active_tasks[task_id]['stage'] = 'Task cancelled by user'
+                        self.logger.log_task_status(task_id, 'cancelled', stage='Task cancelled by user')
+                    else:
+                        self.active_tasks[task_id]['status'] = 'failed'
+                        self.active_tasks[task_id]['error'] = str(e)
+                        self.active_tasks[task_id]['stage'] = f'Processing failed: {str(e)}'
+                        self.logger.log_task_status(task_id, 'failed', error=str(e))
+            raise e
+        finally:
+            # Clean up cancellation event
+            with self.task_lock:
+                if task_id in self.task_events:
+                    del self.task_events[task_id]
     
     def queue_processor(self, execute_func):
-        """Process tasks from the queue."""
+        """Process tasks from the queue using thread pool."""
         self.logger.log_system('Queue processor started')
         while True:
-            task = None
             try:
                 task = self.task_queue.get()
                 if task is None:  # Shutdown signal
                     self.logger.log_system('Queue processor received shutdown signal')
                     break
                 
-                self.logger.log_system(f'Processing queued task: {task["id"]}')
-                self.process_task(task['id'], task['input_folder'], task['params'], execute_func)
-                self.task_queue.task_done()
+                # Wait until we can accept a new task
+                while not self.can_accept_task():
+                    time.sleep(1)
+                
+                # Submit task to thread pool
+                with self.task_lock:
+                    self.processing_tasks.add(task['id'])
+                
+                def task_wrapper(task):
+                    try:
+                        # Store the future in the task data for potential cancellation
+                        with self.task_lock:
+                            self.active_tasks[task['id']]['future'] = threading.current_thread()
+                        
+                        self.process_task(task['id'], task['input_folder'], task['params'], execute_func)
+                    except Exception as e:
+                        if task['id'] in self.cancelled_tasks:
+                            self.logger.log_system(f'Task {task["id"]} was cancelled')
+                        else:
+                            self.logger.log_error(f'Task processing error: {str(e)}')
+                    finally:
+                        with self.task_lock:
+                            if task['id'] in self.processing_tasks:
+                                self.processing_tasks.remove(task['id'])
+                            if 'future' in self.active_tasks[task['id']]:
+                                del self.active_tasks[task['id']]['future']
+                        self.task_queue.task_done()
+                
+                future = self.thread_pool.submit(task_wrapper, task)
                 
             except queue.Empty:
                 continue
             except Exception as e:
-                self.logger.log_error(f'Task processing error: {str(e)}', details=traceback.format_exc())
+                self.logger.log_error(f'Queue processor error: {str(e)}', details=traceback.format_exc())
                 if task:
                     with self.task_lock:
-                        task_id = task['id']
-                        if task_id in self.active_tasks:
-                            self.active_tasks[task_id]['status'] = 'failed'
-                            self.active_tasks[task_id]['error'] = str(e)
-                            self.active_tasks[task_id]['stage'] = 'Failed'
-                            self.logger.log_task_status(task_id, 'failed', error=str(e))
-                self.task_queue.task_done()
+                        if task['id'] in self.processing_tasks:
+                            self.processing_tasks.remove(task['id'])
+                    self.task_queue.task_done()
             finally:
                 if task:
                     task_id = task['id']
