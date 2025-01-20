@@ -25,11 +25,15 @@ def clean_up(dir):
     shutil.rmtree(dir)
     print(f"Directory cleaned up: {dir}")
 
-def execute(uploadDir = "input", inputType = "0", classificationThreshold = 0.35, predictionThreshold = 0.5, saveLabeledImage = False, outputType = "0", yoloModelType = "n", progress_callback = None):
+def execute(uploadDir = "input", inputType = "0", classificationThreshold = 0.35, predictionThreshold = 0.5, saveLabeledImage = False, outputType = "0", yoloModelType = "n", progress_callback = None, cancellation_check = None):
     start_time = time.time()
     
     if progress_callback:
         progress_callback("Initializing processing environment", 2)
+    
+    # Check for cancellation
+    if cancellation_check and cancellation_check():
+        raise Exception("Task cancelled by user")
     
     outputFolder = create_dir("run/output")
     extractDir = create_dir("run/extract")
@@ -45,12 +49,21 @@ def execute(uploadDir = "input", inputType = "0", classificationThreshold = 0.35
         # Extract files if needed
         if progress_callback:
             progress_callback("Starting file extraction", 5)
+        
+        # Check for cancellation
+        if cancellation_check and cancellation_check():
+            raise Exception("Task cancelled by user")
+            
         extract_files(inputType, uploadDir, extractDir)
         
         if progress_callback:
             progress_callback("File extraction completed", 15)
             progress_callback("Initializing image segmentation", 20)
         
+        # Check for cancellation
+        if cancellation_check and cancellation_check():
+            raise Exception("Task cancelled by user")
+            
         # Run segmentation
         boundBoxSegmentation(classificationThreshold, outputFolder, extractDir)
         
@@ -59,10 +72,24 @@ def execute(uploadDir = "input", inputType = "0", classificationThreshold = 0.35
             progress_callback("Loading YOLO model", 45)
             progress_callback(f"Initializing YOLO model type: {yoloModelType}", 48)
         
-        # Run prediction
+        # Check for cancellation
+        if cancellation_check and cancellation_check():
+            raise Exception("Task cancelled by user")
+            
+        # Run prediction with progress tracking
         if progress_callback:
             progress_callback("Starting image processing with YOLO model", 50)
-        output_path = prediction(predictionThreshold, saveLabeledImage, outputType, outputFolder, yoloModelType)
+            
+        def obb_progress_callback(current_image, total_images):
+            if progress_callback:
+                # Scale progress from 50 to 80 based on OBB processing
+                progress = 50 + (current_image / total_images * 30)
+                progress_callback(f"Processing image {current_image}/{total_images}", int(progress))
+                
+            if cancellation_check and cancellation_check():
+                raise Exception("Task cancelled by user")
+                
+        output_path = prediction(predictionThreshold, saveLabeledImage, outputType, outputFolder, yoloModelType, obb_progress_callback)
         
         if progress_callback:
             progress_callback("YOLO processing completed", 80)

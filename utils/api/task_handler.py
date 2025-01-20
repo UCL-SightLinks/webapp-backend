@@ -91,14 +91,13 @@ class TaskHandler:
             task['stage'] = 'Cancelled by user'
             task['progress'] = 100
             
-            # Remove from processing tasks if it's being processed
             if task_id in self.processing_tasks:
                 self.processing_tasks.remove(task_id)
                 # If there's a future associated with this task, try to cancel it
                 if 'future' in task:
                     task['future'].cancel()
             
-            # Clean up input and output folders
+            # Clean up input folder
             input_folder = task.get('input_folder')
             if input_folder and os.path.exists(input_folder):
                 try:
@@ -107,34 +106,7 @@ class TaskHandler:
                 except Exception as e:
                     self.logger.log_error(f'Error cleaning up input folder: {str(e)}')
             
-            # Clean up output folder if it exists
-            session_id = task.get('session_id')
-            if session_id:
-                output_folder = os.path.join(self.BASE_OUTPUT_FOLDER, session_id)
-                if os.path.exists(output_folder):
-                    try:
-                        shutil.rmtree(output_folder)
-                        self.logger.log_cleanup('output_folder', output_folder)
-                    except Exception as e:
-                        self.logger.log_error(f'Error cleaning up output folder: {str(e)}')
-                
-                # Clean up any associated zip files
-                zip_path = os.path.join(self.BASE_OUTPUT_FOLDER, f"{session_id}.zip")
-                if os.path.exists(zip_path):
-                    try:
-                        os.remove(zip_path)
-                        self.logger.log_cleanup('zip_file', zip_path)
-                    except Exception as e:
-                        self.logger.log_error(f'Error cleaning up zip file: {str(e)}')
-            
-            # Remove task from active tasks immediately
-            del self.active_tasks[task_id]
-            if task_id in self.task_events:
-                del self.task_events[task_id]
-            if task_id in self.cancelled_tasks:
-                self.cancelled_tasks.remove(task_id)
-            
-            self.logger.log_task_status(task_id, 'cancelled', progress=100, stage='Task cancelled and cleaned up')
+            self.logger.log_task_status(task_id, 'cancelled', progress=100, stage='Cancelled by user')
             return True
     
     def check_cancellation(self, task_id):
@@ -145,111 +117,6 @@ class TaskHandler:
             return True
         return False
     
-    def count_input_files(self, input_folder):
-        """Count the number of input files that need to be processed."""
-        total_files = 0
-        for root, _, files in os.walk(input_folder):
-            for file in files:
-                if file.endswith(('.jpg', '.jgw')) and not file.startswith('._'):
-                    total_files += 1
-        return total_files // 2  # Divide by 2 since each image has both .jpg and .jgw
-
-    def count_remaining_files(self, output_folder):
-        """Count the number of remaining files to be processed in the output directory."""
-        if not os.path.exists(output_folder):
-            return 0, 0  # No files to process yet
-            
-        segmentation_remaining = 0
-        obb_remaining = 0
-        
-        # Count files in the main output directory (for segmentation)
-        for item in os.listdir(output_folder):
-            if item.endswith('.jpg') and not item.startswith('._'):
-                segmentation_remaining += 1
-        
-        # Count files in the labeledImages directory (for OBB)
-        labeled_images_dir = os.path.join(output_folder, 'labeledImages')
-        if os.path.exists(labeled_images_dir):
-            for item in os.listdir(labeled_images_dir):
-                if item.endswith('.jpg') and not item.startswith('._'):
-                    obb_remaining += 1
-        
-        return segmentation_remaining, obb_remaining
-
-    def calculate_progress(self, task_id, input_folder, output_folder, base_progress=0, stage=''):
-        """Calculate progress based on remaining files and provide detailed stage information."""
-        try:
-            with self.task_lock:
-                if task_id not in self.active_tasks:
-                    return base_progress, stage
-                    
-                total_files = self.active_tasks[task_id].get('total_files')
-                if total_files is None:
-                    total_files = self.count_input_files(input_folder)
-                    self.active_tasks[task_id]['total_files'] = total_files
-                
-                if total_files == 0:
-                    return base_progress, stage
-                
-                segmentation_remaining, obb_remaining = self.count_remaining_files(output_folder)
-                
-                # Calculate progress and update stage description
-                if base_progress < 15:
-                    # Initialization phase
-                    stage = f"Initializing and extracting files ({base_progress}%)"
-                    return base_progress, stage
-                elif base_progress < 45:
-                    # Image segmentation phase - Linear progress from 15% to 45%
-                    if segmentation_remaining == 0:
-                        # All files processed
-                        total_progress = 45
-                    else:
-                        # Calculate how many files have been processed
-                        processed = total_files - segmentation_remaining
-                        # Linear progress from 15% to 45% based on processed files
-                        total_progress = 15 + ((processed / total_files) * 30)
-                    
-                    stage = f"Segmenting aerial images: {total_files - segmentation_remaining}/{total_files} images"
-                    return total_progress, stage
-                elif base_progress < 90:
-                    # OBB detection phase - Linear progress from 45% to 90%
-                    if obb_remaining == 0 and os.path.exists(os.path.join(output_folder, 'output.json')):
-                        # All files processed and output generated
-                        total_progress = 90
-                    else:
-                        # Calculate progress based on both remaining files and output generation
-                        if obb_remaining == 0:
-                            # Files processed but output not generated yet
-                            total_progress = 85
-                        else:
-                            # Calculate based on processed files
-                            processed = total_files - obb_remaining
-                            # Linear progress from 45% to 85% based on processed files
-                            total_progress = 45 + ((processed / total_files) * 40)
-                    
-                    stage = f"Detecting oriented bounding boxes: {total_files - obb_remaining}/{total_files} images processed"
-                    return total_progress, stage
-                else:
-                    # Finalization phase - Linear progress from 90% to 100%
-                    if os.path.exists(os.path.join(output_folder, 'output.json')):
-                        # Output generated, calculate zip progress
-                        zip_name = f"{os.path.basename(output_folder)}.zip"
-                        zip_path = os.path.join(os.path.dirname(output_folder), zip_name)
-                        if os.path.exists(zip_path):
-                            total_progress = 100
-                        else:
-                            total_progress = 95
-                    else:
-                        total_progress = 90
-                    
-                    stage = f"Finalizing results: {total_files}/{total_files} images completed"
-                    return total_progress, stage
-                
-                return base_progress, stage
-        except Exception as e:
-            self.logger.log_error(f"Error calculating progress: {str(e)}")
-            return base_progress, stage
-
     def process_task(self, task_id, input_folder, params, execute_func):
         """Process a single task and update its status."""
         output_folder = None
@@ -274,7 +141,7 @@ class TaskHandler:
                     self.active_tasks[task_id]['stage'] = 'Initializing processing environment'
                     self.active_tasks[task_id]['session_id'] = session_id
             
-            # Convert parameters to proper types
+            # Convert and log parameters
             params_log = {
                 'output_type': int(str(params.get('output_type', '0'))),
                 'input_type': int(str(params.get('input_type', '0'))),
@@ -285,24 +152,17 @@ class TaskHandler:
             }
             self.logger.log_system(f'Task {task_id} parameters: {params_log}')
             
-            # Define progress callback that uses file-based progress
-            def progress_callback(stage, base_progress):
+            # Execute model with progress callback and cancellation check
+            def progress_callback(stage, progress):
                 if task_id:
                     # Check for cancellation
                     if self.check_cancellation(task_id):
                         raise Exception("Task cancelled by user")
                     
                     with self.task_lock:
-                        # Calculate progress based on processed files
-                        if output_folder:
-                            progress, detailed_stage = self.calculate_progress(task_id, input_folder, output_folder, base_progress, stage)
-                        else:
-                            progress = base_progress
-                            detailed_stage = stage
-                        
                         self.active_tasks[task_id]['progress'] = progress
-                        self.active_tasks[task_id]['stage'] = detailed_stage
-                        self.logger.log_task_status(task_id, 'processing', progress=progress, stage=detailed_stage)
+                        self.active_tasks[task_id]['stage'] = stage
+                        self.logger.log_task_status(task_id, 'processing', progress=progress, stage=stage)
             
             # Check for cancellation before starting execution
             if self.check_cancellation(task_id):
@@ -317,7 +177,8 @@ class TaskHandler:
                 params_log['save_labeled_image'],
                 params_log['output_type'],
                 params_log['yolo_model_type'],
-                progress_callback
+                progress_callback,
+                lambda: self.check_cancellation(task_id)  # Pass cancellation check function
             )
             
             # Check for cancellation after execution
@@ -331,11 +192,9 @@ class TaskHandler:
             
             if task_id:
                 with self.task_lock:
-                    total_files = self.active_tasks[task_id].get('total_files', 0)
-                    processed_files = self.count_processed_files(output_folder)
                     self.active_tasks[task_id]['progress'] = 95
-                    self.active_tasks[task_id]['stage'] = f'Creating final ZIP archive ({processed_files}/{total_files} images completed)'
-                    self.logger.log_task_status(task_id, 'processing', progress=95, stage=f'Creating final ZIP archive ({processed_files}/{total_files} images completed)')
+                    self.active_tasks[task_id]['stage'] = 'Creating final ZIP archive'
+                    self.logger.log_task_status(task_id, 'processing', progress=95, stage='Creating final ZIP archive')
             
             # Create ZIP file
             zip_name = f"{os.path.basename(output_folder)}.zip"
@@ -359,13 +218,11 @@ class TaskHandler:
             
             if task_id:
                 with self.task_lock:
-                    total_files = self.active_tasks[task_id].get('total_files', 0)
-                    processed_files = self.count_processed_files(output_folder)
                     self.active_tasks[task_id]['status'] = 'completed'
                     self.active_tasks[task_id]['progress'] = 100
-                    self.active_tasks[task_id]['stage'] = f'Task completed successfully ({processed_files}/{total_files} images processed)'
+                    self.active_tasks[task_id]['stage'] = 'Task completed successfully'
                     self.active_tasks[task_id]['zip_path'] = zip_path
-                    self.logger.log_task_status(task_id, 'completed', progress=100, stage=f'Task completed successfully ({processed_files}/{total_files} images processed)')
+                    self.logger.log_task_status(task_id, 'completed', progress=100, stage='Task completed successfully')
             
             return task_id
             

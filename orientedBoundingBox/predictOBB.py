@@ -28,7 +28,7 @@ def saveTXTOutput(outputFolder, imageName, coordinates, confidences=None):
                 line += f" {confidences[i]}"
             file.write(line + "\n")
 
-def prediction(predictionThreshold=0.25, saveLabeledImage=False, outputType="0", outputFolder="run/output", modelType="n"):
+def prediction(predictionThreshold=0.25, saveLabeledImage=False, outputType="0", outputFolder="run/output", modelType="n", progress_callback=None):
     # Convert outputType to int if it's a string
     outputType = int(outputType) if isinstance(outputType, str) else outputType
     
@@ -39,12 +39,20 @@ def prediction(predictionThreshold=0.25, saveLabeledImage=False, outputType="0",
     imageDetections = {}
     processedImages = set()  # Use set to avoid duplicates
     
+    # Get total number of images to process
+    total_images = len([f for f in os.listdir(outputFolder) if f.endswith(('.jpg', '.jpeg', '.png'))])
+    current_image = 0
+    
     print("\n=== Processing Images ===")
     # First, process all images and group detections
-    with tqdm(total=(len(os.listdir(outputFolder))//2), desc="Creating Oriented Bounding Box") as pbar:
+    with tqdm(total=(total_images//2), desc="Creating Oriented Bounding Box") as pbar:
         for image in os.listdir(outputFolder):
             if not image.endswith(('.jpg', '.jpeg', '.png')):
                 continue
+                
+            current_image += 1
+            if progress_callback:
+                progress_callback(current_image, total_images)
                 
             imagePath = os.path.join(outputFolder, image)
             try:

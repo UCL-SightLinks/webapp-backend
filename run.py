@@ -35,4 +35,6 @@ if __name__ == "__main__":
             predictionThreshold, 
             saveLabeledImage, 
             outputType, 
-            yoloModelType)
+            yoloModelType,
+            None,  # progress_callback
+            None)  # cancellation_check
