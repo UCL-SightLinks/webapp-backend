@@ -95,7 +95,15 @@ class TaskHandler:
                 self.processing_tasks.remove(task_id)
                 # If there's a future associated with this task, try to cancel it
                 if 'future' in task:
-                    task['future'].cancel()
+                    future = task['future']
+                    if future and not future.done():
+                        future.cancel()
+                        # Wait a short time for the task to clean up
+                        try:
+                            future.result(timeout=1.0)
+                        except:
+                            pass  # Ignore any exceptions from the cancelled task
+                    del task['future']
             
             # Clean up input folder
             input_folder = task.get('input_folder')
@@ -123,6 +131,10 @@ class TaskHandler:
         try:
             if self.check_cancellation(task_id):
                 self.logger.log_task_status(task_id, 'cancelled', stage='Task was cancelled before processing')
+                # Clean up input folder on cancellation
+                if input_folder and os.path.exists(input_folder):
+                    shutil.rmtree(input_folder)
+                    self.logger.log_cleanup('input_folder', input_folder)
                 return None
             
             self.logger.log_task_status(task_id, 'processing', progress=0, stage='Starting task initialization')
@@ -134,6 +146,10 @@ class TaskHandler:
                 with self.task_lock:
                     if self.check_cancellation(task_id):
                         self.logger.log_task_status(task_id, 'cancelled', stage='Task was cancelled during initialization')
+                        # Clean up input folder on cancellation
+                        if input_folder and os.path.exists(input_folder):
+                            shutil.rmtree(input_folder)
+                            self.logger.log_cleanup('input_folder', input_folder)
                         return None
                     
                     self.active_tasks[task_id]['status'] = 'processing'
@@ -157,6 +173,10 @@ class TaskHandler:
                 if task_id:
                     # Check for cancellation
                     if self.check_cancellation(task_id):
+                        # Clean up input folder on cancellation
+                        if input_folder and os.path.exists(input_folder):
+                            shutil.rmtree(input_folder)
+                            self.logger.log_cleanup('input_folder', input_folder)
                         raise Exception("Task cancelled by user")
                     
                     with self.task_lock:
@@ -166,6 +186,10 @@ class TaskHandler:
             
             # Check for cancellation before starting execution
             if self.check_cancellation(task_id):
+                # Clean up input folder on cancellation
+                if input_folder and os.path.exists(input_folder):
+                    shutil.rmtree(input_folder)
+                    self.logger.log_cleanup('input_folder', input_folder)
                 raise Exception("Task cancelled by user")
             
             # Pass cancellation event to execute function
@@ -183,6 +207,13 @@ class TaskHandler:
             
             # Check for cancellation after execution
             if self.check_cancellation(task_id):
+                # Clean up both input and output folders on cancellation
+                if input_folder and os.path.exists(input_folder):
+                    shutil.rmtree(input_folder)
+                    self.logger.log_cleanup('input_folder', input_folder)
+                if output_folder and os.path.exists(output_folder):
+                    shutil.rmtree(output_folder)
+                    self.logger.log_cleanup('output_folder', output_folder)
                 raise Exception("Task cancelled by user")
             
             if not output_folder or not os.path.exists(output_folder):
@@ -192,6 +223,16 @@ class TaskHandler:
             
             if task_id:
                 with self.task_lock:
+                    if self.check_cancellation(task_id):
+                        # Clean up both input and output folders on cancellation
+                        if input_folder and os.path.exists(input_folder):
+                            shutil.rmtree(input_folder)
+                            self.logger.log_cleanup('input_folder', input_folder)
+                        if output_folder and os.path.exists(output_folder):
+                            shutil.rmtree(output_folder)
+                            self.logger.log_cleanup('output_folder', output_folder)
+                        raise Exception("Task cancelled by user")
+                        
                     self.active_tasks[task_id]['progress'] = 95
                     self.active_tasks[task_id]['stage'] = 'Creating final ZIP archive'
                     self.logger.log_task_status(task_id, 'processing', progress=95, stage='Creating final ZIP archive')
@@ -210,6 +251,16 @@ class TaskHandler:
                 for root, _, files in os.walk(output_folder):
                     for file in files:
                         if self.check_cancellation(task_id):
+                            # Clean up all resources on cancellation
+                            if input_folder and os.path.exists(input_folder):
+                                shutil.rmtree(input_folder)
+                                self.logger.log_cleanup('input_folder', input_folder)
+                            if output_folder and os.path.exists(output_folder):
+                                shutil.rmtree(output_folder)
+                                self.logger.log_cleanup('output_folder', output_folder)
+                            if os.path.exists(zip_path):
+                                os.remove(zip_path)
+                                self.logger.log_cleanup('zip_file', zip_path)
                             raise Exception("Task cancelled during ZIP creation")
                         file_path = os.path.join(root, file)
                         arcname = os.path.relpath(file_path, output_folder)
@@ -218,6 +269,19 @@ class TaskHandler:
             
             if task_id:
                 with self.task_lock:
+                    if self.check_cancellation(task_id):
+                        # Clean up all resources on cancellation
+                        if input_folder and os.path.exists(input_folder):
+                            shutil.rmtree(input_folder)
+                            self.logger.log_cleanup('input_folder', input_folder)
+                        if output_folder and os.path.exists(output_folder):
+                            shutil.rmtree(output_folder)
+                            self.logger.log_cleanup('output_folder', output_folder)
+                        if os.path.exists(zip_path):
+                            os.remove(zip_path)
+                            self.logger.log_cleanup('zip_file', zip_path)
+                        raise Exception("Task cancelled after ZIP creation")
+                        
                     self.active_tasks[task_id]['status'] = 'completed'
                     self.active_tasks[task_id]['progress'] = 100
                     self.active_tasks[task_id]['stage'] = 'Task completed successfully'
@@ -239,6 +303,15 @@ class TaskHandler:
                         self.active_tasks[task_id]['error'] = str(e)
                         self.active_tasks[task_id]['stage'] = f'Processing failed: {str(e)}'
                         self.logger.log_task_status(task_id, 'failed', error=str(e))
+            
+            # Clean up any remaining resources on error
+            if input_folder and os.path.exists(input_folder):
+                shutil.rmtree(input_folder)
+                self.logger.log_cleanup('input_folder', input_folder)
+            if output_folder and os.path.exists(output_folder):
+                shutil.rmtree(output_folder)
+                self.logger.log_cleanup('output_folder', output_folder)
+            
             raise e
         finally:
             # Clean up cancellation event
@@ -266,10 +339,6 @@ class TaskHandler:
                 
                 def task_wrapper(task):
                     try:
-                        # Store the future in the task data for potential cancellation
-                        with self.task_lock:
-                            self.active_tasks[task['id']]['future'] = threading.current_thread()
-                        
                         self.process_task(task['id'], task['input_folder'], task['params'], execute_func)
                     except Exception as e:
                         if task['id'] in self.cancelled_tasks:
@@ -280,12 +349,14 @@ class TaskHandler:
                         with self.task_lock:
                             if task['id'] in self.processing_tasks:
                                 self.processing_tasks.remove(task['id'])
-                            if 'future' in self.active_tasks[task['id']]:
-                                del self.active_tasks[task['id']]['future']
                         self.task_queue.task_done()
                 
                 future = self.thread_pool.submit(task_wrapper, task)
                 
+                # Store the future in the task data for cancellation
+                with self.task_lock:
+                    self.active_tasks[task['id']]['future'] = future
+            
             except queue.Empty:
                 continue
             except Exception as e:
