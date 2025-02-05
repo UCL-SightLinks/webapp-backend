@@ -122,6 +122,87 @@ task_handler = TaskHandler()
 request_handler = RequestHandler(file_handler)
 logger_handler = LoggerHandler()
 
+@app.route('/api/test', methods=['GET', 'POST'])
+def test_api():
+    """Test endpoint to verify API functionality"""
+    try:
+        # Log the request
+        logger_handler.log_request(request.method, '/api/test')
+        
+        # Basic server info
+        server_info = {
+            "status": "operational",
+            "version": "1.0.0",
+            "timestamp": datetime.now().isoformat(),
+            "endpoints": {
+                "test": "/api/test",
+                "predict": "/api/predict",
+                "web_predict": "/web/predict",
+                "status": "/web/status/<task_id>",
+                "download": "/download/<token>"
+            }
+        }
+        
+        if request.method == 'POST':
+            # Echo back any JSON data sent
+            data = request.get_json(silent=True) or {}
+            server_info["echo"] = data
+            
+            # Test file upload if present
+            if request.files:
+                files = request.files.getlist('file')
+                server_info["files"] = [
+                    {
+                        "filename": f.filename,
+                        "content_type": f.content_type,
+                        "size": len(f.read()) if f else 0
+                    } for f in files
+                ]
+        
+        # Test model paths
+        model_checks = {
+            "yolo_n": os.path.exists("models/yolo-n.pt"),
+            "yolo_s": os.path.exists("models/yolo-s.pt"),
+            "mobilenet": os.path.exists("models/MobileNetV3_state_dict_big_train.pth"),
+            "vgg16": os.path.exists("models/VGG16_Full_State_Dict.pth")
+        }
+        server_info["models"] = model_checks
+        
+        # Test directory structure
+        dir_checks = {
+            "run_output": os.path.exists("run/output"),
+            "run_extract": os.path.exists("run/extract"),
+            "input": os.path.exists("input"),
+            "models": os.path.exists("models")
+        }
+        server_info["directories"] = dir_checks
+        
+        # Test CUDA availability
+        try:
+            import torch
+            server_info["cuda"] = {
+                "available": torch.cuda.is_available(),
+                "device_count": torch.cuda.device_count() if torch.cuda.is_available() else 0,
+                "device_name": torch.cuda.get_device_name(0) if torch.cuda.is_available() else None
+            }
+        except Exception as e:
+            server_info["cuda"] = {"error": str(e)}
+        
+        # System info
+        import psutil
+        server_info["system"] = {
+            "cpu_percent": psutil.cpu_percent(),
+            "memory_percent": psutil.virtual_memory().percent,
+            "disk_percent": psutil.disk_usage('/').percent
+        }
+        
+        return request_handler.create_success_response(server_info)
+        
+    except Exception as e:
+        logger_handler.log_error(str(e), details=traceback.format_exc())
+        return request_handler.create_error_response(str(e), 500)
+
+
 @app.route('/api/predict', methods=['POST'])
 def predict_api():
     """Direct API endpoint that waits for completion"""
@@ -224,6 +305,7 @@ def predict_web():
     except Exception as e:
         logger_handler.log_error(str(e), details=traceback.format_exc())
         return request_handler.create_error_response(str(e), 500)
+
 
 @app.route('/web/status/<task_id>', methods=['GET'])
 def get_task_status(task_id):
