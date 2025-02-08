@@ -3,7 +3,21 @@ API Documentation
 
 Base URL: http://localhost:8000
 
-1. Direct Processing API
+1. Test API
+   Endpoint: /api/test
+   Method: GET, POST
+   Description: Test endpoint to verify API functionality and server status
+   Response: JSON containing:
+   - Server status and version
+   - Available endpoints
+   - Model availability status
+   - Directory structure status
+   - CUDA availability
+   - System resources (CPU, memory, disk usage)
+   - Echo of POST data (if POST method)
+   - File information (if files uploaded)
+
+2. Direct Processing API
    Endpoint: /api/predict
    Method: POST
    Description: Synchronously processes uploaded files and returns results immediately
@@ -15,9 +29,11 @@ Base URL: http://localhost:8000
    - save_labeled_image: Whether to save labeled images (true/false, default: false)
    - output_type: Output type (0=JSON, 1=TXT, default: 0)
    - yolo_model_type: YOLO model type (n/s/m/l, default: n)
-   Response: ZIP file containing results
+   Response: 
+   - If Accept: application/json: JSON with status and output path
+   - Otherwise: ZIP file containing results
 
-2. Web Processing API (Queued)
+3. Web Processing API (Queued)
    Endpoint: /web/predict
    Method: POST
    Description: Asynchronously processes files with progress tracking
@@ -27,8 +43,12 @@ Base URL: http://localhost:8000
      "task_id": "uuid",
      "message": "Task queued successfully"
    }
+   Error Response (503):
+   {
+     "error": "Server is busy. Please try again later."
+   }
 
-3. Task Status
+4. Task Status
    Endpoint: /web/status/<task_id>
    Method: GET
    Description: Get task status and progress
@@ -36,17 +56,22 @@ Base URL: http://localhost:8000
    {
      "percentage": 0-100,           # Progress percentage
      "log": "current_stage",        # Current stage or status message
+     "has_detections": boolean,     # Whether any detections were found
      "download_token": "token",     # Only included when task is completed
      "error": "error_message"       # Only included when task has failed
    }
 
-4. Download Results
+5. Download Results
    Endpoint: /download/<token>
    Method: GET
    Description: Download processed results using token
    Response: ZIP file containing results
+   Headers:
+   - Content-Type: application/zip
+   - Content-Disposition: attachment; filename=result.zip
+   - Content-Length: file size in bytes
 
-5. Cancel Task
+6. Cancel Task
    Endpoint: /web/cancel/<task_id>
    Method: POST
    Description: Cancel a running or queued task
@@ -60,7 +85,7 @@ Base URL: http://localhost:8000
      "error": "Task not found or already completed"
    }
 
-6. Server Status
+7. Server Status
    Endpoint: /api/server-status
    Method: GET
    Description: Get current server status and statistics
@@ -86,6 +111,8 @@ Notes:
 - Progress updates are provided in real-time
 - Failed tasks include error messages in status response
 - Cancelled tasks can't be resumed
+- Server implements CORS and allows all origins
+- All endpoints support OPTIONS method for CORS preflight requests
 """
 
 from flask import Flask, request, send_file
@@ -97,6 +124,7 @@ from datetime import datetime
 import zipfile
 import json
 import traceback
+import atexit
 
 from utils.api.task_handler import TaskHandler
 from utils.api.auth_handler import AuthHandler
@@ -104,23 +132,111 @@ from utils.api.file_handler import FileHandler
 from utils.api.request_handler import RequestHandler
 from utils.api.logger_handler import LoggerHandler
 
-app = Flask(__name__)
-# Enable CORS for all origins
-CORS(app, resources={
-    r"/*": {
-        "origins": "*",  # Allow all origins
-        "methods": ["GET", "POST", "OPTIONS"],
-        "allow_headers": ["Content-Type", "Authorization"],
-        "expose_headers": ["Content-Disposition"]
-    }
-})
+# Global flag to track if background threads are running
+background_threads_started = False
+background_threads = []
 
-# Initialize handlers
+def create_app():
+    """Create and configure the Flask application."""
+    app = Flask(__name__)
+    
+    # Configure maximum file size (e.g., 5GB)
+    app.config['MAX_CONTENT_LENGTH'] = 5 * 1024 * 1024 * 1024  # 5GB in bytes
+    
+    # Enable CORS for all origins
+    CORS(app, resources={
+        r"/*": {
+            "origins":  ["https://sightlinks.org/", "https://zealous-sky-0d4bd381e.4.azurestaticapps.net", "*"],  # Allow all origins
+            "methods": ["GET", "POST", "PUT", "DELETE", "OPTIONS", "PATCH"],
+            "allow_headers": [
+                "Content-Type",
+                "Authorization",
+                "Access-Control-Allow-Credentials",
+                "Access-Control-Allow-Headers",
+                "Access-Control-Allow-Methods",
+                "Access-Control-Allow-Origin",
+                "Accept",
+                "Origin",
+                "X-Requested-With",
+                "X-CSRF-Token"
+            ],
+            "expose_headers": [
+                "Content-Disposition",
+                "Content-Length",
+                "Content-Type",
+                "X-Total-Count"
+            ],
+            "cors_allowed_origins": ["https://sightlinks.org/", "https://zealous-sky-0d4bd381e.4.azurestaticapps.net", "*"],
+            "supports_credentials": True,
+            "max_age": 86400  # Cache preflight requests for 24 hours
+        }
+    })
+    
+    return app
+
+app = create_app()
+
+# Initialize handlers as global variables
 file_handler = FileHandler()
 auth_handler = AuthHandler()
 task_handler = TaskHandler()
 request_handler = RequestHandler(file_handler)
 logger_handler = LoggerHandler()
+
+def start_background_threads():
+    """Start background threads if not already running."""
+    global background_threads_started
+    
+    if not background_threads_started:
+        logger_handler.log_system('Starting background threads')
+        
+        # Start cleanup thread
+        cleanup_thread = threading.Thread(
+            target=task_handler.cleanup_old_files,
+            daemon=True,
+            name='cleanup_thread'
+        )
+        cleanup_thread.start()
+        background_threads.append(cleanup_thread)
+        
+        # Start queue processor thread
+        queue_thread = threading.Thread(
+            target=task_handler.queue_processor,
+            args=(execute,),
+            daemon=True,
+            name='queue_thread'
+        )
+        queue_thread.start()
+        background_threads.append(queue_thread)
+        
+        background_threads_started = True
+        logger_handler.log_system('Background threads started')
+
+def shutdown_threads():
+    """Shutdown background threads gracefully."""
+    global background_threads_started
+    
+    if background_threads_started:
+        logger_handler.log_system('Shutting down background threads')
+        
+        # Signal queue processor to stop
+        task_handler.task_queue.put(None)
+        
+        # Wait for threads to finish
+        for thread in background_threads:
+            if thread.is_alive():
+                thread.join(timeout=5.0)
+        
+        background_threads_started = False
+        logger_handler.log_system('Background threads stopped')
+
+# Register shutdown function
+atexit.register(shutdown_threads)
+
+@app.before_first_request
+def before_first_request():
+    """Initialize the application before the first request."""
+    start_background_threads()
 
 @app.route('/api/test', methods=['GET', 'POST'])
 def test_api():
@@ -227,11 +343,22 @@ def predict_api():
         
         # Get task result
         task = task_handler.get_task_status(task_id)
-        logger_handler.log_task_status(task_id, task['status'], error=task.get('error'))
+        if task is None:
+            error_msg = f"Task {task_id} not found or failed to process"
+            logger_handler.log_error(error_msg)
+            return request_handler.create_error_response(error_msg, 500)
         
-        if task['status'] == 'failed':
-            logger_handler.log_error(task['error'])
-            return request_handler.create_error_response(task['error'], 500)
+        logger_handler.log_task_status(task_id, task.get('status', 'unknown'), error=task.get('error'))
+        
+        if task.get('status') == 'failed':
+            error_msg = task.get('error', 'Unknown error occurred')
+            logger_handler.log_error(error_msg)
+            return request_handler.create_error_response(error_msg, 500)
+        
+        if not task.get('zip_path'):
+            error_msg = "No output file was generated"
+            logger_handler.log_error(error_msg)
+            return request_handler.create_error_response(error_msg, 500)
         
         logger_handler.log_file_operation('SEND', task['zip_path'])
         # Return response based on client preference
@@ -311,11 +438,8 @@ def predict_web():
 def get_task_status(task_id):
     """Get task status and progress."""
     try:
-        logger_handler.log_request('GET', f'/web/status/{task_id}')
-        
         task = task_handler.get_task_status(task_id)
         if not task:
-            logger_handler.log_error(f'Task not found: {task_id}')
             return request_handler.create_error_response('Task not found', 404)
         
         response = {
@@ -327,24 +451,26 @@ def get_task_status(task_id):
         # Add error if task failed
         if task.get('status') == 'failed':
             response['error'] = task.get('error', 'Unknown error')
-            logger_handler.log_task_status(task_id, 'failed', error=response['error'])
+            return request_handler.create_success_response(response)
+        
+        # Add error if task cancelled
+        if task.get('status') == 'cancelled' or task.get('is_cancelled', False):
+            response['error'] = 'Task cancelled by user'
             return request_handler.create_success_response(response)
         
         # Add download token if task completed
-        if task.get('status') == 'completed':
+        if task.get('status') == 'completed' and task.get('zip_path'):
             # Check if there are any detections
             zip_path = task.get('zip_path')
             if zip_path and os.path.exists(zip_path):
                 try:
                     with zipfile.ZipFile(zip_path, 'r') as zf:
-                        # Look for output.json in the ZIP
                         for filename in zf.namelist():
                             if filename.endswith('output.json'):
                                 with zf.open(filename) as f:
                                     content = f.read()
                                     if content:
                                         data = json.loads(content)
-                                        # Check if any entry has detections
                                         response['has_detections'] = any(
                                             len(entry.get('coordinates', [])) > 0 
                                             for entry in data
@@ -353,9 +479,12 @@ def get_task_status(task_id):
                 except Exception as e:
                     logger_handler.log_error(f'Error checking detections: {str(e)}')
             
-            token = auth_handler.generate_download_token(task['session_id'], task_id)
-            response['download_token'] = token
-            logger_handler.log_task_status(task_id, 'completed', stage='Processing completed')
+            # Generate download token
+            if task.get('session_id'):
+                token = auth_handler.generate_download_token(task['session_id'], task_id)
+                response['download_token'] = token
+            else:
+                logger_handler.log_error(f'Missing session_id for completed task: {task_id}')
         
         return request_handler.create_success_response(response)
         
@@ -442,21 +571,17 @@ def download_result(token):
 
 @app.route('/web/cancel/<task_id>', methods=['POST'])
 def cancel_task(task_id):
-    """Cancel a running or queued task"""
+    """Cancel a running or queued task."""
     try:
-        logger_handler.log_request('POST', f'/web/cancel/{task_id}')
-        
         # Try to cancel the task
         cancelled = task_handler.cancel_task(task_id)
         if cancelled:
-            logger_handler.log_task_status(task_id, 'cancelled', stage='Cancelled by user')
             return request_handler.create_success_response({
                 'status': 'success',
                 'message': 'Task cancelled successfully'
             })
         else:
-            logger_handler.log_error(f'Task cancel failed: {task_id}')
-            return request_handler.create_error_response('Task not found or already completed', 404)
+            return request_handler.create_error_response('Task not found or cannot be cancelled', 404)
             
     except Exception as e:
         logger_handler.log_error(str(e), details=traceback.format_exc())
@@ -473,16 +598,6 @@ def get_server_status():
         logger_handler.log_error(str(e), details=traceback.format_exc())
         return request_handler.create_error_response(str(e), 500)
 
-# Start background threads
-logger_handler.log_system('Starting background threads')
-cleanup_thread = threading.Thread(target=task_handler.cleanup_old_files, daemon=True)
-cleanup_thread.start()
-
-queue_thread = threading.Thread(target=task_handler.queue_processor, args=(execute,), daemon=True)
-queue_thread.start()
-
-logger_handler.log_system('Background threads started')
-
 if __name__ == '__main__':
     logger_handler.log_system('Starting Flask server on port 8000')
-    app.run(host='0.0.0.0', port=8000, debug=False) 
+    app.run(host='127.0.0.1', port=8000, debug=False) 
