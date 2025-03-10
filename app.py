@@ -1,10 +1,10 @@
 """
 API Documentation
 
-Base URL: http://localhost:8000
+Base URL: http://localhost:8000/api
 
 1. Test API
-   Endpoint: /api/test
+   Endpoint: /test
    Method: GET, POST
    Description: Test endpoint to verify API functionality and server status
    Response: JSON containing:
@@ -18,7 +18,7 @@ Base URL: http://localhost:8000
    - File information (if files uploaded)
 
 2. Direct Processing API
-   Endpoint: /api/predict
+   Endpoint: /predict
    Method: POST
    Description: Synchronously processes uploaded files and returns results immediately
    Parameters:
@@ -86,7 +86,7 @@ Base URL: http://localhost:8000
    }
 
 7. Server Status
-   Endpoint: /api/server-status
+   Endpoint: /server-status
    Method: GET
    Description: Get current server status and statistics
    Response:
@@ -146,27 +146,9 @@ def create_app():
     # Enable CORS for all origins
     CORS(app, resources={
         r"/*": {
-            "origins":  ["https://sightlinks.org/", "https://zealous-sky-0d4bd381e.4.azurestaticapps.net", "*"],  # Allow all origins
+            "origins":  ["https://sightlinks.org/", "*"],  # Allow all origins
             "methods": ["GET", "POST", "PUT", "DELETE", "OPTIONS", "PATCH"],
-            "allow_headers": [
-                "Content-Type",
-                "Authorization",
-                "Access-Control-Allow-Credentials",
-                "Access-Control-Allow-Headers",
-                "Access-Control-Allow-Methods",
-                "Access-Control-Allow-Origin",
-                "Accept",
-                "Origin",
-                "X-Requested-With",
-                "X-CSRF-Token"
-            ],
-            "expose_headers": [
-                "Content-Disposition",
-                "Content-Length",
-                "Content-Type",
-                "X-Total-Count"
-            ],
-            "cors_allowed_origins": ["https://sightlinks.org/", "https://zealous-sky-0d4bd381e.4.azurestaticapps.net", "*"],
+            "cors_allowed_origins": ["https://sightlinks.org/", "*"],
             "supports_credentials": True,
             "max_age": 86400  # Cache preflight requests for 24 hours
         }
@@ -238,12 +220,12 @@ def before_first_request():
     """Initialize the application before the first request."""
     start_background_threads()
 
-@app.route('/api/test', methods=['GET', 'POST'])
+@app.route('/test', methods=['GET', 'POST'])
 def test_api():
     """Test endpoint to verify API functionality"""
     try:
         # Log the request
-        logger_handler.log_request(request.method, '/api/test')
+        logger_handler.log_request(request.method, '/test')
         
         # Basic server info
         server_info = {
@@ -251,8 +233,8 @@ def test_api():
             "version": "1.0.0",
             "timestamp": datetime.now().isoformat(),
             "endpoints": {
-                "test": "/api/test",
-                "predict": "/api/predict",
+                "test": "/test",
+                "predict": "/predict",
                 "web_predict": "/web/predict",
                 "status": "/web/status/<task_id>",
                 "download": "/download/<token>"
@@ -319,15 +301,15 @@ def test_api():
         return request_handler.create_error_response(str(e), 500)
 
 
-@app.route('/api/predict', methods=['POST'])
+@app.route('/predict', methods=['POST'])
 def predict_api():
     """Direct API endpoint that waits for completion"""
     try:
-        logger_handler.log_request('POST', '/api/predict')
+        logger_handler.log_request('POST', '/predict')
         
         # Parse request
         files, params = request_handler.parse_request_parameters(request)
-        logger_handler.log_request('POST', '/api/predict', params=params)
+        logger_handler.log_request('POST', '/predict', params=params)
         
         # Create session folders
         session_id, input_folder = file_handler.create_session_folders()
@@ -587,11 +569,11 @@ def cancel_task(task_id):
         logger_handler.log_error(str(e), details=traceback.format_exc())
         return request_handler.create_error_response(str(e), 500)
 
-@app.route('/api/server-status', methods=['GET'])
+@app.route('/server-status', methods=['GET'])
 def get_server_status():
     """Get current server status and statistics."""
     try:
-        logger_handler.log_request('GET', '/api/server-status')
+        logger_handler.log_request('GET', '/server-status')
         status = task_handler.get_server_status()
         return request_handler.create_success_response(status)
     except Exception as e:
