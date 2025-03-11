@@ -16,8 +16,8 @@ class FileHandler:
         self.BASE_UPLOAD_FOLDER = 'input'
         self.BASE_OUTPUT_FOLDER = 'run/output'
         self.ALLOWED_EXTENSIONS = {
-            '0': {'zip'},  # Digimap data - only zip files
-            '1': {'zip', 'jpg', 'jgw'}  # Custom data - zip, jpg, and jgw files
+            '0': {'zip', 'jpg', 'jpeg', 'png', 'jgw'},  # Type 0: jpg/png/jpeg + jgw or zip including these
+            '1': {'zip', 'tif', 'tiff'}  # Type 1: GeoTIFF files or zip including them
         }
         
         # Create base directories if they don't exist
