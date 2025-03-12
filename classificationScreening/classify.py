@@ -19,65 +19,25 @@ warnings.filterwarnings(
     module=r'.*'
 )
 
-vgg16_state_path = "models/VGG16_Full_State_Dict.pth"
-# A prototype v2 version that's only been trained on 2000 images by transfer learning
-mobileNet_path = "models/MobileNetV3_state_dict_big_train.pth"
+mobileNet_path = "models/mn3_vs55.pth"
 data_path = "classificationScreening/classification_data"
 
 classify = None
 transform = None
 
-def load_vgg_classifier(state_dict_path):
-    # Ignore depreciation warnings --> It works fine for our needs
-    model = models.vgg16()
-
-    # Modifies fully connected layer to output binary class predictions
-    model.classifier[6] = torch.nn.Linear(model.classifier[6].in_features, 2)
-    state_dict = torch.load(state_dict_path)
-    model.load_state_dict(state_dict)
-
-    model.eval()
-
-    return model
-
-# Only loads the classifier weights, in the case where it is transfer learning on only the top.
-# This saves a significant amount of space
-def partial_vgg_load(classifier_state_dict_path):
-    model = models.vgg16(weights=models.VGG16_Weights.DEFAULT)
-
-    model.classifier[6] = torch.nn.Linear(model.classifier[6].in_features, 2)
-    model.classifier.load_state_dict(classifier_state_dict_path)
-
-    model.eval()
-
-    return model
-
-def load_resnet_classifier(state_dict_path):
-    # Ignore depreciation warnings --> It works fine for our needs
-    resnet = models.resnet18(pretrained=True)
-    resnet.fc = torch.nn.Linear(resnet.fc.in_features, 1)
-
-    state_dict = torch.load(state_dict_path)
-    resnet.load_state_dict(state_dict)
-    
-    resnet.eval()
-    return resnet
-
 def load_mobileNet_classifier(state_dict_path):
     # Ignore depreciation warnings --> It works fine for our needs
     model = models.mobilenet_v3_small()
     model.classifier[3] = torch.nn.Linear(model.classifier[3].in_features, 2)
-
-    state_dict = torch.load(state_dict_path)
+    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    state_dict = torch.load(state_dict_path, map_location=device)
     model.load_state_dict(state_dict)
 
     model.eval()
     return model
 
-# classify = load_vgg_classifier(vgg16_state_path)
 classify = load_mobileNet_classifier(mobileNet_path)
 transform = classUtils.vgg_transform
-
 
 # Expects a numpy array image
 def infer(image, infer_model=classify, infer_transform=transform):
@@ -91,10 +51,10 @@ def infer(image, infer_model=classify, infer_transform=transform):
     if len(image.shape) <= 3:
         image = image.unsqueeze(0)
 
-    logit_pred = infer_model(image)
+    
+    pred = torch.sigmoid(infer_model(image))
+    probs = pred.detach().numpy()
 
-    probs = 1 / (1 + np.exp(-logit_pred.detach().numpy()))
-    # prob = max(0, min(np.exp(logit_pred.detach().numpy())[0], 1))
     return probs
 
 def PIL_infer(image, threshold=0.35):
@@ -127,7 +87,7 @@ def example_init(examples=20, display=True):
     correct, incorrect, falsepos, falseneg = 0, 0, 0, 0
     for point in random_points:
         image, label = dataset[point]
-        # label = label[0]  # Do not need to train so doesn't have to be a tensor
+
         class_guess = [0, 1]
         if infer(image)[0][0] > 0.5:
             class_guess = [1, 0]

@@ -1,161 +1,133 @@
 from ultralytics import YOLO
+import numpy as np
+from osgeo import gdal, osr
+from PIL import Image
 from tqdm import tqdm
 import os
-import json
 import sys
-import re
+import traceback
 
-# Load a model
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..")))
-from georeference.georeference import georeferecePoints
-from georeference.georeference import BNGtoLatLong
+from georeference.georeference import georeferenceTIF, georefereceJGW, BNGtoLatLong
+from utils.filterOutput import removeDuplicateBoxesRC, combineChunksToBaseName
 
-def getOriginalImageName(filename):
-    """Extract original image name from segmented filename"""
-    # Remove row and column information (e.g., '_r1_c1')
-    return re.sub(r'_r\d+_c\d+$', '', filename)
+def predictionJGW(imageAndDatas, predictionThreshold=0.25, saveLabeledImage=False, outputFolder="run/output", modelType="n"):
+    """
+    This function will take all of the segmented image and their georeferencing data from imageAndDatas, where the model then 
+    processes the image and  creates a list of bounding boxes. It then takes each bounding box, georeferences it, and then 
+    stores it in the dictionary imageDetectionsRowCol, where the key stores the basename, row, and column which this bounding 
+    box came from. After looping through all of the items, it is then filtered to reduce duplications. This filter also 
+    removes the row and column data, storing all of the bounding boxes from one image with the image name as the key.
 
-def saveTXTOutput(outputFolder, imageName, coordinates, confidences=None):
-    """Save coordinates and optional confidence scores to a TXT file with one bounding box per line"""
-    txtPath = os.path.join(outputFolder, f"{imageName}.txt")
+    Args:
+        imageAndDatas (list): A list of the input image name, segmented image, georeferencing data, row, and column.
+        predictionThreshold (float): The confidence threshold for the bounding box model.
+        saveLabeledImage (bool): If true, the images with bounding boxes will be saved.
+        outputFolder (str): This directs where the model should save the output to.
+        modelType (str): The type of model used.
     
-    with open(txtPath, 'w') as file:
-        for i, coordSet in enumerate(coordinates):
-            # Format each point as "lon,lat" and join with spaces
-            line = " ".join([f"{point[0]},{point[1]}" for point in coordSet])
-            # Add confidence score if available
-            if confidences is not None and i < len(confidences):
-                line += f" {confidences[i]}"
-            file.write(line + "\n")
-
-def prediction(predictionThreshold=0.25, saveLabeledImage=False, outputType="0", outputFolder="run/output", modelType="n", progress_callback=None):
-    # Convert outputType to int if it's a string
-    outputType = int(outputType) if isinstance(outputType, str) else outputType
-    
+    Returns:
+        imageDetections (dict): A dictionary where the basename of an image is the key, and the key stores a list of boxes in latitude and longitude, and their respective confidence
+    """
     modelPath = f"models/yolo-{modelType}.pt"
     model = YOLO(modelPath)  # load an official model
-    
     # Dictionary to store all detections and their confidence grouped by original image
-    imageDetections = {}
-    processedImages = set()  # Use set to avoid duplicates
-    
-    # Get total number of images to process
-    total_images = len([f for f in os.listdir(outputFolder) if f.endswith(('.jpg', '.jpeg', '.png'))])
-    current_image = 0
-    
-    print("\n=== Processing Images ===")
+    imageDetectionsRowCol = {}
+    numOfSavedImages = 1
     # First, process all images and group detections
-    with tqdm(total=(total_images//2), desc="Creating Oriented Bounding Box") as pbar:
-        for image in os.listdir(outputFolder):
-            if not image.endswith(('.jpg', '.jpeg', '.png')):
-                continue
-                
-            current_image += 1
-            if progress_callback:
-                progress_callback(current_image, total_images)
-                
-            imagePath = os.path.join(outputFolder, image)
+    with tqdm(total=(len(imageAndDatas)), desc="Creating Oriented Bounding Box") as pbar:
+        for baseName, croppedImage, pixelSizeX, pixelSizeY, topLeftXGeo, topLeftYGeo, row, col in imageAndDatas:
             try:
-                # Get original image name
-                originalImage = getOriginalImageName(os.path.splitext(image)[0])
-                print(f"\nProcessing image: {originalImage}")
-                processedImages.add(originalImage)  # Add to processed images set
-                
                 allPointsList = []
                 allConfidenceList = []
-                results = model(imagePath, save=saveLabeledImage, conf=predictionThreshold, iou=0.9, 
-                              project=outputFolder+"/labeledImages", name="run", exist_ok=True, verbose=False)
-                
+                results = model(croppedImage, save=saveLabeledImage, conf=predictionThreshold, iou=0.01, 
+                            project=outputFolder+"/labeledImages", name="run", exist_ok=True, verbose=False)
+                if saveLabeledImage and os.path.exists(outputFolder+"/labeledImages/run/image0.jpg"):
+                    os.rename(outputFolder+"/labeledImages/run/image0.jpg", outputFolder+f"/labeledImages/run/image{numOfSavedImages}.jpg")
+                    numOfSavedImages += 1
                 for result in results:
                     result = result.cpu()
                     for confidence in result.obb.conf:
                         allConfidenceList.append(confidence.item())
                     for boxes in result.obb.xyxyxyxy:
-                        x1, y1 = boxes[0]
-                        x2, y2 = boxes[1]
-                        x3, y3 = boxes[2]
-                        x4, y4 = boxes[3]
-                        listOfPoints = georeferecePoints(x1,y1,x2,y2,x3,y3,x4,y4,imagePath)
-                        longLatList = BNGtoLatLong(listOfPoints)
-                        allPointsList.append(longLatList)
-                
-                # Initialize or update detections for this image
-                if originalImage not in imageDetections:
-                    imageDetections[originalImage] = [[],[]]
+                        x1, y1 = boxes[0].tolist()
+                        x2, y2 = boxes[1].tolist()
+                        x3, y3 = boxes[2].tolist()
+                        x4, y4 = boxes[3].tolist()
+                        listOfPoints = georefereceJGW(x1,y1,x2,y2,x3,y3,x4,y4,pixelSizeX,pixelSizeY,topLeftXGeo,topLeftYGeo)
+                        latLongList = BNGtoLatLong(listOfPoints)
+                        allPointsList.append(latLongList)
                 if allPointsList:
-                    imageDetections[originalImage][0].extend(allPointsList)
-                    imageDetections[originalImage][1].extend(allConfidenceList)
-                
-                print(f"Found {len(allPointsList)} detections")
-                print(f"Confidence scores: {allConfidenceList}")
-                
-                os.remove(imagePath)
-                os.remove(imagePath.replace('jpg', 'jgw'))
-                pbar.update(1)
+                    baseNameWithRowCol = f"{baseName}__r{row}__c{col}"
+                    imageDetectionsRowCol[baseNameWithRowCol] = [allPointsList,allConfidenceList]
             except Exception as e:
-                print(f"Error processing {imagePath}: {e}")
+                print(f"Error processing {croppedImage}: {e}")
+                print(traceback.format_exc())
+            pbar.update(1)
+        
+    removeDuplicateBoxesRC(imageDetectionsRowCol=imageDetectionsRowCol)
+    imageDetections = combineChunksToBaseName(imageDetectionsRowCol=imageDetectionsRowCol)
+    return imageDetections
+
+# This version of predictionTIF has filtering
+def predictionTIF(imageAndDatas, predictionThreshold=0.25, saveLabeledImage=False, outputFolder="run/output", modelType="n"):
+    """
+    This function will take all of the segmented image and their georeferencing data from imageAndDatas, where the model then 
+    processes the image and  creates a list of bounding boxes. It then takes each bounding box, georeferences it, and then 
+    stores it in the dictionary imageDetectionsRowCol, where the key stores the basename, row, and column which this bounding 
+    box came from. After looping through all of the items, it is then filtered to reduce duplications. This filter also 
+    removes the row and column data, storing all of the bounding boxes from one image with the image name as the key.
+
+    Args:
+        imageAndDatas (list): A list of the input image name, segmented tif image, row, and column.
+        predictionThreshold (float): The confidence threshold for the bounding box model.
+        saveLabeledImage (bool): If true, the images with bounding boxes will be saved.
+        outputFolder (str): This directs where the model should save the output to.
+        modelType (str): The type of model used.
     
-    print("\n=== Saving Results ===")
-    # Now save the grouped detections
-    if outputType == 0:
-        # Save as JSON
-        jsonOutput = []
-        # Include all processed images in output
-        for originalImage in sorted(processedImages):  # Sort for consistent output
-            coordAndConf = imageDetections.get(originalImage, [[],[]])
-            entry = {
-                "image": f"{originalImage}.jpg",
-                "coordinates": coordAndConf[0],
-                "confidence": coordAndConf[1]
-            }
-            jsonOutput.append(entry)
-            print(f"\nImage: {originalImage}")
-            print(f"Coordinates: {len(coordAndConf[0])} points")
-            print(f"Confidence scores: {len(coordAndConf[1])} values")
-        
-        jsonPath = os.path.join(outputFolder, "output.json")
-        print(f"\nWriting JSON output to: {jsonPath}")
-        print("JSON content:")
-        print(json.dumps(jsonOutput, indent=2))
-        
-        # Validate JSON content before writing
-        if not jsonOutput:
-            print("WARNING: No detections found in any processed images")
-            jsonOutput = [{"image": f"{img}.jpg", "coordinates": [], "confidence": []} for img in processedImages]
-            print("Creating empty entries for all processed images")
-        
-        try:
-            with open(jsonPath, 'w') as file:
-                json.dump(jsonOutput, file, indent=2)
-            
-            # Verify the file was written correctly
-            if os.path.exists(jsonPath):
-                file_size = os.path.getsize(jsonPath)
-                print(f"JSON file size: {file_size} bytes")
+    Returns:
+        imageDetections (dict): A dictionary where the basename of an image is the key, and the key stores a list of boxes in latitude and longitude, and their respective confidence.
+    """
+    modelPath = f"models/yolo-{modelType}.pt"
+    model = YOLO(modelPath)  # load an official model
+    # Dictionary to store all detections and their confidence grouped by image, row, and column
+    imageDetectionsRowCol = {}
+    numOfSavedImages = 1
+    # First, process all images and group detections
+    with tqdm(total=(len(imageAndDatas)), desc="Creating Oriented Bounding Box") as pbar:
+        for baseName, croppedImage, row, col in imageAndDatas:
+            try:
+                allPointsList = []
+                allConfidenceList = []
+                croppedImageArray = croppedImage.ReadAsArray()
+                if croppedImageArray.ndim == 3:
+                    croppedImageArray = np.moveaxis(croppedImageArray, 0, -1)
+                PILImage = Image.fromarray(croppedImageArray)
+                results = model(PILImage, save=saveLabeledImage, conf=predictionThreshold, iou=0.9, 
+                              project=outputFolder+"/labeledImages", name="run", exist_ok=True, verbose=False)
                 
-                # Read back and validate content
-                with open(jsonPath, 'r') as file:
-                    content = file.read()
-                    if not content:
-                        print("ERROR: File is empty after writing")
-                    else:
-                        try:
-                            parsed = json.loads(content)
-                            print(f"Successfully verified JSON content with {len(parsed)} entries")
-                            for entry in parsed:
-                                print(f"Entry for {entry['image']}: {len(entry['coordinates'])} detections")
-                        except json.JSONDecodeError as e:
-                            print(f"ERROR: Invalid JSON content: {e}")
-            else:
-                print("ERROR: File was not created")
-        except Exception as e:
-            print(f"ERROR writing JSON file: {e}")
-            raise
-    else:
-        # Save as TXT files
-        for originalImage, coordAndConf in sorted(imageDetections.items()):  # Sort for consistent output
-            saveTXTOutput(outputFolder, originalImage, coordAndConf[0], coordAndConf[1])
-        print(f"\nTXT files saved to: {outputFolder}")
-    
-    print(f"\nProcessed {len(processedImages)} original images")
-    return outputFolder
+                if saveLabeledImage and os.path.exists(outputFolder+"/labeledImages/run/image0.jpg"):
+                    os.rename(outputFolder+"/labeledImages/run/image0.jpg", outputFolder+f"/labeledImages/run/image{numOfSavedImages}.jpg")
+                    numOfSavedImages += 1
+                for result in results:
+                    result = result.cpu()
+                    for confidence in result.obb.conf:
+                        allConfidenceList.append(confidence.item())
+                    for boxes in result.obb.xyxyxyxy:
+                        x1, y1 = boxes[0].tolist()
+                        x2, y2 = boxes[1].tolist()
+                        x3, y3 = boxes[2].tolist()
+                        x4, y4 = boxes[3].tolist()
+                        longLatList = georeferenceTIF(croppedImage,x1,y1,x2,y2,x3,y3,x4,y4)
+                        allPointsList.append(longLatList)
+                if allPointsList:
+                    baseNameWithRowCol = f"{baseName}__r{row}__c{col}"
+                    imageDetectionsRowCol[baseNameWithRowCol] = [allPointsList,allConfidenceList]
+                    
+            except Exception as e:
+                print(f"Error processing {baseName}: {e}")
+                print(traceback.format_exc())
+            pbar.update(1)
+    removeDuplicateBoxesRC(imageDetectionsRowCol=imageDetectionsRowCol)
+    imageDetections = combineChunksToBaseName(imageDetectionsRowCol=imageDetectionsRowCol)
+    return imageDetections

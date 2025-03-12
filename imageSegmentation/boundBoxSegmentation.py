@@ -1,131 +1,142 @@
 from PIL import Image
+from osgeo import gdal
 from tqdm import tqdm
 import os
 import sys
 
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
-
 from imageSegmentation.classificationSegmentation import classificationSegmentation
 
-def get_georef_file_path(image_path):
-    """Get the corresponding georeferencing file path."""
-    base, ext = os.path.splitext(image_path)
-    # Try different possible georeferencing extensions
-    for geo_ext in ['.jgw', '.jpgw', '.pngw', '.jpegw']:
-        geo_path = base + geo_ext
-        if os.path.exists(geo_path):
-            return geo_path
-    return None
+defaultLargeImageDimensions = 4000
+boundBoxChunkSize = 1024
+classificationChunkSize = 256
 
-def read_georef_data(geo_path):
-    """Read georeferencing data from file."""
-    try:
-        with open(geo_path, 'r') as f:
-            lines = f.readlines()
-            if len(lines) < 6:
-                raise ValueError("Incomplete georeferencing data")
-            return {
-                'pixelSizeX': float(lines[0].strip()),
-                'rotationX': float(lines[1].strip()),
-                'rotationY': float(lines[2].strip()),
-                'pixelSizeY': float(lines[3].strip()),
-                'topLeftXGeo': float(lines[4].strip()),
-                'topLeftYGeo': float(lines[5].strip())
-            }
-    except Exception as e:
-        raise ValueError(f"Error reading georeferencing data: {str(e)}")
+def boundBoxSegmentationJGW(classificationThreshold=0.35, extractDir = "run/extract"):
+    """
+    This function will iterate through all of the .png, .jpg, and .jpeg images from the extract directory.
+    It will then call the classificationSegmentation function and receive all the chunks of interest for each image.
+    From these chunks of interest, it will resegment them into boxes with size boundBoxChunkSize, with the original
+    chunks in the center when possible.
 
-def boundBoxSegmentation(classificationThreshold=0.35, outputFolder="run/output", extractDir="run/extract", progress_callback=None):
-    # Create output directory if it doesn't exist
-    os.makedirs(outputFolder, exist_ok=True)
+    After resegmenting the image, it will calculate the new georeferencing data, including the new topLeftXGeo, 
+    and topLeftYGeo. It will then save this new segmented image, and all georeferencing data needed for this chunk in
+    imageAndDatas. Once all of the image has been processed, imageAndDatas is returned.
+
+    Args:
+        classificationThreshold (float): The threshold for the classification model.
+        extractDir (str): The path to the directory where all of the input images are.
     
-    # Get list of image files
-    image_files = [f for f in os.listdir(extractDir) if f.lower().endswith(('.png', '.jpg', '.jpeg'))]
-    total_files = len(image_files)
-    current_file = 0
-    
-    with tqdm(total=total_files, desc="Segmenting Images") as pbar:
-        for inputFileName in image_files:
-            try:
-                current_file += 1
-                if progress_callback:
-                    progress_callback(current_file, total_files)
-                    
-                imagePath = os.path.join(extractDir, inputFileName)
-                
-                # Open and verify image
+    Returns:
+        imageAndDatas (list): A list of the input image name, segmented image, georeferencing data, row, and column.
+    """
+    with tqdm(total=(len(os.listdir(extractDir))//2), desc="Segmenting Images") as pbar:
+        imageAndDatas = []
+        chunkSeen = set()
+        for inputFileName in os.listdir(extractDir):
+            if inputFileName.endswith(('.png', '.jpg', '.jpeg')):
                 try:
+                    imagePath = os.path.join(extractDir, inputFileName)
                     originalImage = Image.open(imagePath)
-                    originalImage.verify()  # Verify image is valid
-                    originalImage = Image.open(imagePath)  # Reopen after verify
-                except Exception as e:
-                    print(f"Error: Invalid image file {imagePath}: {str(e)}")
-                    continue
-                
-                width, height = originalImage.size
-                
-                # Get georeferencing data
-                geo_path = get_georef_file_path(imagePath)
-                if not geo_path:
-                    print(f"Warning: No georeferencing file found for {imagePath}")
-                    continue
-                
-                try:
-                    geo_data = read_georef_data(geo_path)
-                except ValueError as e:
-                    print(f"Warning: {str(e)} for {imagePath}")
-                    continue
-                
-                # Get chunks of interest
-                try:
-                    chunksOfInterest = classificationSegmentation(imagePath, classificationThreshold)
-                except Exception as e:
-                    print(f"Error in classification for {imagePath}: {str(e)}")
-                    continue
-                
-                # Get original filename without extension
-                baseName = os.path.splitext(inputFileName)[0]
-                
-                # Process each chunk
-                for row, col in chunksOfInterest:
-                    try:
-                        # Size of bounding box and classification chunks
-                        largeChunkSize = 1024
-                        smallChunkSize = 256
-                        
-                        # Calculate chunk coordinates
+                    width, height = originalImage.size
+                    chunksOfInterest = classificationSegmentation(inputFileName=imagePath, classificationThreshold=classificationThreshold, classificationChunkSize=classificationChunkSize)
+                    #data for georeferencing
+                    with open(imagePath.replace('jpg', 'jgw'), 'r') as jgwFile:
+                        lines = jgwFile.readlines()
+                    pixelSizeX = float(lines[0].strip())
+                    pixelSizeY = float(lines[3].strip())
+                    topLeftXGeo = float(lines[4].strip())
+                    topLeftYGeo = float(lines[5].strip())
+
+                    for row, col in chunksOfInterest:
+                        # The new topRow and topCol is essentially getting reduced by 1.5 to keep our original chunk of interest
+                        # in the center. However, this has to be updated if the ratio between classificationChunkSize and 
+                        # boundBoxChunkSize changes.
                         topRow = row - 1
                         topCol = col - 1
-                        topX = max(0, topCol * smallChunkSize - smallChunkSize / 2)
-                        topY = max(0, topRow * smallChunkSize - smallChunkSize / 2)
-                        
-                        # Adjust for image boundaries
-                        topX = min(topX, width - largeChunkSize)
-                        topY = min(topY, height - largeChunkSize)
-                        
-                        # Crop and save image
-                        box = (int(topX), int(topY), int(topX + largeChunkSize), int(topY + largeChunkSize))
+                        topX = topCol * classificationChunkSize - classificationChunkSize / 2 if topCol > 0 else 0 #This is the top left x
+                        topY = topRow * classificationChunkSize - classificationChunkSize / 2 if topRow > 0 else 0 #This is the top left y
+
+                        if topX + boundBoxChunkSize > width:
+                            topX = width - boundBoxChunkSize
+                        if topY + boundBoxChunkSize > height:
+                            topY = height - boundBoxChunkSize
+
+                        box = (topX, topY, topX + boundBoxChunkSize, topY + boundBoxChunkSize)
+                        imageChunk = f"{inputFileName}{(topX, topY, boundBoxChunkSize)}"
+                        if imageChunk in chunkSeen:
+                            continue
+                        chunkSeen.add(imageChunk)
                         cropped = originalImage.crop(box)
                         
-                        # Create output filenames
-                        outputImage = os.path.join(outputFolder, f"{baseName}_r{row}_c{col}.jpg")
-                        outputJGW = os.path.join(outputFolder, f"{baseName}_r{row}_c{col}.jgw")
+                        topLeftXGeoInterest = topLeftXGeo + topX * pixelSizeX
+                        topLeftYGeoInterest = topLeftYGeo + topY * pixelSizeY
+                        imageAndDatas.append((inputFileName, cropped, pixelSizeX, pixelSizeY, topLeftXGeoInterest, topLeftYGeoInterest, row, col)) 
+                except Exception as e:
+                    print(f"Error opening {imagePath}: {e}")
+            pbar.update(1)
+        return imageAndDatas
+
+
+def boundBoxSegmentationTIF(classificationThreshold=0.35, extractDir = "run/extract"):
+    """
+    This function will iterate through all of the .tif images from the extract directory.
+    It will then call the classificationSegmentation function and receive all the chunks of interest for each image.
+    From these chunks of interest, it will resegment them into boxes with size boundBoxChunkSize, with the original
+    chunks in the center when possible.
+
+    During the segmentation, we are also updating the georeferencing data for the new TIF file, keeping the TIF format.
+
+    Args:
+        classificationThreshold (float): The threshold for the classification model.
+        extractDir (str): The path to the directory where all of the input images are.
+    
+    Returns:
+        imageAndDatas (list): A list of the input image name, segmented TIF image, row, and column.
+    """
+    with tqdm(total=(len(os.listdir(extractDir))), desc="Segmenting Images") as pbar:
+        imageAndDatas = []
+        chunkSeen = set()
+        for inputFileName in os.listdir(extractDir):
+            if inputFileName.endswith(('.tif')):
+                try:
+                    imagePath = os.path.join(extractDir, inputFileName)
+                    dataset = gdal.Open(imagePath, gdal.GA_ReadOnly)
+                    if dataset is None:
+                        raise Exception(f"Failed to open {imagePath}")
+                    
+                    width = dataset.RasterXSize
+                    height = dataset.RasterYSize
+                    # Get the georeference data (this will be used to preserve georeferencing)
+                    geoTransform = dataset.GetGeoTransform()
+                    chunksOfInterest = classificationSegmentation(inputFileName=imagePath, classificationThreshold=classificationThreshold, classificationChunkSize=classificationChunkSize)
+
+                    for row, col in chunksOfInterest:
+                        # The new topRow and topCol is essentially getting reduced by 1.5 to keep our original chunk of interest
+                        # in the center. However, this has to be updated if the ratio between classificationChunkSize and 
+                        # boundBoxChunkSize changes.
+                        topRow = row - 1
+                        topCol = col - 1
+                        topX = topCol * classificationChunkSize - classificationChunkSize / 2 if topCol > 0 else 0  # Top left x
+                        topY = topRow * classificationChunkSize - classificationChunkSize / 2 if topRow > 0 else 0  # Top left y
                         
-                        # Save image and georeferencing data
-                        cropped.save(outputImage, quality=95)
-                        with open(outputJGW, 'w') as file:
-                            file.write(f"{geo_data['pixelSizeX']:.10f}\n")
-                            file.write(f"{geo_data['rotationX']:.10f}\n")
-                            file.write(f"{geo_data['rotationY']:.10f}\n")
-                            file.write(f"{geo_data['pixelSizeY']:.10f}\n")
-                            file.write(f"{(geo_data['topLeftXGeo'] + topX * geo_data['pixelSizeX']):.10f}\n")
-                            file.write(f"{(geo_data['topLeftYGeo'] + topY * geo_data['pixelSizeY']):.10f}\n")
+                        if topX + boundBoxChunkSize > width:
+                            topX = width - boundBoxChunkSize
+                        if topY + boundBoxChunkSize > height:
+                            topY = height - boundBoxChunkSize
+                        # Convert the pixel coordinates to georeferenced coordinates
+                        georeferencedTopX = geoTransform[0] + topX * geoTransform[1] + topY * geoTransform[2]
+                        georeferencedTopY = geoTransform[3] + topX * geoTransform[4] + topY * geoTransform[5]
                         
-                        pbar.update(1)
-                    except Exception as e:
-                        print(f"Error processing chunk row={row}, col={col} for {imagePath}: {str(e)}")
-                        continue
-                        
-            except Exception as e:
-                print(f"Error processing {imagePath}: {str(e)}")
-                continue
+                        # Use GDAL to create the cropped image, preserving georeference
+                        imageChunk = f"{inputFileName}{(topX, topY, boundBoxChunkSize)}"
+                        if imageChunk in chunkSeen:
+                            continue
+                        chunkSeen.add(imageChunk)
+                        cropped = gdal.Translate("", dataset, srcWin=[topX, topY, boundBoxChunkSize, boundBoxChunkSize], 
+                                    projWin=[georeferencedTopX, georeferencedTopY, geoTransform[0] + (topX + boundBoxChunkSize) * geoTransform[1], geoTransform[3] + (topY + boundBoxChunkSize) * geoTransform[5]], 
+                                    format="MEM")
+                        imageAndDatas.append((inputFileName, cropped, row, col))
+                except Exception as e:
+                    print(f"Error opening {imagePath}: {e}")
+            pbar.update(1)
+        return imageAndDatas

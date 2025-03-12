@@ -1,6 +1,6 @@
 # SightLink
 
-SightLink is a computer vision system designed to detect and georeference buildings in aerial imagery. It processes both Digimap and custom aerial imagery, providing oriented bounding boxes with geographical coordinates. The system uses a combination of image segmentation, YOLO-based detection, and georeferencing to accurately identify and locate buildings in aerial photographs.
+SightLink is a computer vision system designed to detect and georeference crosswalks in aerial imagery. It processes .jpg (or .jpeg, .png) with their corresponding .jgw file and .tif files, providing oriented bounding boxes with latitude and longitude coordinates. The system uses a combination of image segmentation, mobileNet detection, YOLO-based detection, georeferencing, and filtering to accurately identify and locate crosswalks in aerial photographs.
 
 ## Table of Contents
 
@@ -16,16 +16,15 @@ SightLink is a computer vision system designed to detect and georeference buildi
 
 ## Features
 
-- Supports both Digimap and custom aerial imagery
-- Automatic extraction and handling of zip archives
-- Building detection using YOLO-based models (multiple variants available)
-- Automatic georeferencing of detected buildings
+- Supports .jpg with .jgw files and .tif files
+- Automatic extraction and handling of zip input files
+- Crosswalk detection using YOLO-based models (multiple variants available)
+- Automatic georeferencing and filtering of detected crosswalks
 - Multiple output formats (JSON/TXT)
 - Progress tracking with detailed progress bars
 - Organized output with timestamped directories
 - Handles both single files and batch processing
-- Automatic cleanup of temporary files
-- Analysis tools for comparing detection results
+- Visualization tool for comparing detection results.
 
 ## Prerequisites
 
@@ -64,24 +63,12 @@ venv\Scripts\activate
 pip install -r requirements.txt
 ```
 
-4. Set up model files:
-
-- Download and place YOLO model files in the `models/` directory:
-  - `yolo-n.pt` (nano model)
-  - Other model variants as needed
-
-5. Create required directories:
-
-```bash
-mkdir -p input run/output
-```
-
 ## Quick Start
 
 1. Place input files in the `input` directory:
 
-   - For Digimap data: Place zip files directly downloaded from DigiMap
-   - For custom data: Place .jpg/.jgw files or zip archives
+   - For .jpg/.jgw data: Place zip files containing .jpg/.jgw files (e.g. from Digimap), or directly place the .jpg/.jgw files.
+   - For .tif data: Place zip files containing .tif files, or directly place the .tif files.
 2. Run the system:
 
 ```bash
@@ -93,11 +80,12 @@ python run.py
 ### Basic Usage
 
 ```python
+// This snippet of code is from run.py
 from main import execute
 
 execute(
     uploadDir="input",           # Input directory
-    inputType="0",              # "0" for Digimap, "1" for custom
+    inputType="0",              # "0" for .jpg/.jgw, "1" for .tif files
     classificationThreshold=0.35,
     predictionThreshold=0.5,
     saveLabeledImage=False,
@@ -115,8 +103,8 @@ execute(
   {
     "image": "image_name.jpg",
     "coordinates": [
-      [[lon1,lat1], [lon2,lat2], [lon3,lat3], [lon4,lat4]],  # Building 1
-      [[lon1,lat1], [lon2,lat2], [lon3,lat3], [lon4,lat4]]   # Building 2
+      [[lon1,lat1], [lon2,lat2], [lon3,lat3], [lon4,lat4]],  # crosswalk 1
+      [[lon1,lat1], [lon2,lat2], [lon3,lat3], [lon4,lat4]]   # crosswalk 2
     ]
   }
 ]
@@ -145,19 +133,22 @@ run/output/YYYYMMDD_HHMMSS/  # Timestamp-based directory
 ```
 SightLink-Main/
 ├── classificationScreening/    # Building classification module
-│   ├── Classify.py            # Main classification logic
+│   ├── classify.py            # Main classification logic
 │   └── utils/                 # Classification utilities
 ├── imageSegmentation/         # Image segmentation modules
 │   ├── boundBoxSegmentation.py       # Bounding box segmentation
 │   └── classificationSegmentation.py  # Classification segmentation
 ├── models/                    # YOLO model files
 │   ├── yolo-n.pt             # Nano model
-│   └── MobileNetV3_state_dict_big_train.pth     # Classification Model
+│   └── mn3_vs55.pth     # Classification Model
 ├── georeference/             # Georeferencing utilities
 │   └── Georeference.py       # Coordinate conversion functions
 ├── utils/                    # Utility functions
 │   ├── extract.py           # File extraction handling
-│   └── analyze.py           # Result analysis tools
+│   ├── compress.py           # File compression handling
+│   ├── filterOutput.py           # Filters bounding boxes to remove duplicates
+│   ├── saveToOutput.py           # Saves stored coordinates to output file
+│   └── visualize.py           # Result analysis tools
 ├── run/                      # Runtime directories
 │   └── output/              # Timestamped outputs
 ├── input/                   # Input file directory
@@ -172,57 +163,50 @@ SightLink-Main/
 
 1. **File Extraction**
 
-   - Handles Digimap zip files and custom inputs
+   - Handles .jpg/.jgw files and .tif files
    - Filters system files and unsupported formats
    - Organizes files for processing
 2. **Image Segmentation**
 
    - Segments large aerial images
    - Prepares chunks for classification
-   - Optimizes for detection accuracy
-3. **Building Detection**
+3. **Image classification**
+
+   - Process the segmented images using the classification model
+   - Returns True if the model's confidence is greater than a certain threshold
+4. **Image Segmentation**
+
+   - Re-segment the images based on the rows and columns of interest (where the classification model returns True)
+   - Prepares chunks for classification
+5. **Crosswalk Detection**
 
    - Uses selected YOLO model variant
    - Applies confidence thresholds
    - Supports multiple model types for different performance/accuracy trade-offs
-4. **Georeferencing**
+6. **Georeferencing**
 
    - Converts pixel coordinates to geographical coordinates
-   - Uses .jgw world files for accurate mapping
+   - Uses .jgw world files or data stored in .tif files for accurate mapping 
    - Handles coordinate system transformations
-5. **Output Generation**
+7. **Filtering**
+
+   - Removes duplicate bounding boxes by using Non-Maximum Suppression
+8. **Output Generation**
 
    - Creates timestamped directories
    - Generates selected output format
    - Optionally saves labeled images
-   - Cleans up temporary files
 
 ### Performance Optimization
 
 - GPU acceleration for faster processing
-- Memory-efficient batch processing
-- Progress tracking with estimated times
+- Filter by row and column for a more optimised filter
+- Progress tracking with a progress bar
 - Configurable model selection for speed/accuracy balance
 
 ## Troubleshooting
 
 Common issues and solutions:
 
-- **GPU not detected**: Ensure CUDA toolkit is installed
 - **Memory errors**: Reduce batch size or use nano model
 - **Missing files**: Check input directory structure
-- **Coordinate errors**: Verify .jgw file format
-
-## Contributing
-
-[Add Contributing Guidelines]
-
-## License
-
-[Add License Information]
-
-## Acknowledgments
-
-- YOLO for object detection framework
-- Ultralytics for YOLOv8 implementation
-- [Add other acknowledgments]
