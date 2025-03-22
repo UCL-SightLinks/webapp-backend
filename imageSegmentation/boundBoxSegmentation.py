@@ -7,11 +7,7 @@ import sys
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 from imageSegmentation.classificationSegmentation import classificationSegmentation
 
-defaultLargeImageDimensions = 4000
-boundBoxChunkSize = 1024
-classificationChunkSize = 256
-
-def boundBoxSegmentationJGW(classificationThreshold=0.35, extractDir = "run/extract"):
+def boundBoxSegmentationJGW(classificationThreshold=0.35, extractDir = "run/extract", boundBoxChunkSize=1024, classificationChunkSize=256):
     """
     This function will iterate through all of the .png, .jpg, and .jpeg images from the extract directory.
     It will then call the classificationSegmentation function and receive all the chunks of interest for each image.
@@ -25,6 +21,8 @@ def boundBoxSegmentationJGW(classificationThreshold=0.35, extractDir = "run/extr
     Args:
         classificationThreshold (float): The threshold for the classification model.
         extractDir (str): The path to the directory where all of the input images are.
+        boundBoxChunkSize (int): The size of each side of the bounding box image.
+        classificationChunkSize (int): The size of each side of the classification image.
     
     Returns:
         imageAndDatas (list): A list of the input image name, segmented image, georeferencing data, row, and column.
@@ -40,7 +38,9 @@ def boundBoxSegmentationJGW(classificationThreshold=0.35, extractDir = "run/extr
                     width, height = originalImage.size
                     chunksOfInterest = classificationSegmentation(inputFileName=imagePath, classificationThreshold=classificationThreshold, classificationChunkSize=classificationChunkSize)
                     #data for georeferencing
-                    with open(imagePath.replace('jpg', 'jgw'), 'r') as jgwFile:
+                    baseName, _ = os.path.splitext(imagePath)
+                    jgwPath = baseName + ".jgw"
+                    with open(jgwPath) as jgwFile:
                         lines = jgwFile.readlines()
                     pixelSizeX = float(lines[0].strip())
                     pixelSizeY = float(lines[3].strip())
@@ -48,13 +48,9 @@ def boundBoxSegmentationJGW(classificationThreshold=0.35, extractDir = "run/extr
                     topLeftYGeo = float(lines[5].strip())
 
                     for row, col in chunksOfInterest:
-                        # The new topRow and topCol is essentially getting reduced by 1.5 to keep our original chunk of interest
-                        # in the center. However, this has to be updated if the ratio between classificationChunkSize and 
-                        # boundBoxChunkSize changes.
-                        topRow = row - 1
-                        topCol = col - 1
-                        topX = topCol * classificationChunkSize - classificationChunkSize / 2 if topCol > 0 else 0 #This is the top left x
-                        topY = topRow * classificationChunkSize - classificationChunkSize / 2 if topRow > 0 else 0 #This is the top left y
+                        offset = (boundBoxChunkSize - classificationChunkSize) / 2
+                        topX = col * classificationChunkSize - offset if col * classificationChunkSize - offset > 0 else 0
+                        topY = row * classificationChunkSize - offset if row * classificationChunkSize - offset > 0 else 0
 
                         if topX + boundBoxChunkSize > width:
                             topX = width - boundBoxChunkSize
@@ -67,7 +63,7 @@ def boundBoxSegmentationJGW(classificationThreshold=0.35, extractDir = "run/extr
                             continue
                         chunkSeen.add(imageChunk)
                         cropped = originalImage.crop(box)
-                        
+
                         topLeftXGeoInterest = topLeftXGeo + topX * pixelSizeX
                         topLeftYGeoInterest = topLeftYGeo + topY * pixelSizeY
                         imageAndDatas.append((inputFileName, cropped, pixelSizeX, pixelSizeY, topLeftXGeoInterest, topLeftYGeoInterest, row, col)) 
@@ -77,7 +73,7 @@ def boundBoxSegmentationJGW(classificationThreshold=0.35, extractDir = "run/extr
         return imageAndDatas
 
 
-def boundBoxSegmentationTIF(classificationThreshold=0.35, extractDir = "run/extract"):
+def boundBoxSegmentationTIF(classificationThreshold=0.35, extractDir = "run/extract", boundBoxChunkSize=1024, classificationChunkSize=256):
     """
     This function will iterate through all of the .tif images from the extract directory.
     It will then call the classificationSegmentation function and receive all the chunks of interest for each image.
@@ -89,7 +85,8 @@ def boundBoxSegmentationTIF(classificationThreshold=0.35, extractDir = "run/extr
     Args:
         classificationThreshold (float): The threshold for the classification model.
         extractDir (str): The path to the directory where all of the input images are.
-    
+        boundBoxChunkSize (int): The size of each side of the bounding box image.
+        classificationChunkSize (int): The size of each side of the classification image.
     Returns:
         imageAndDatas (list): A list of the input image name, segmented TIF image, row, and column.
     """
@@ -111,13 +108,9 @@ def boundBoxSegmentationTIF(classificationThreshold=0.35, extractDir = "run/extr
                     chunksOfInterest = classificationSegmentation(inputFileName=imagePath, classificationThreshold=classificationThreshold, classificationChunkSize=classificationChunkSize)
 
                     for row, col in chunksOfInterest:
-                        # The new topRow and topCol is essentially getting reduced by 1.5 to keep our original chunk of interest
-                        # in the center. However, this has to be updated if the ratio between classificationChunkSize and 
-                        # boundBoxChunkSize changes.
-                        topRow = row - 1
-                        topCol = col - 1
-                        topX = topCol * classificationChunkSize - classificationChunkSize / 2 if topCol > 0 else 0  # Top left x
-                        topY = topRow * classificationChunkSize - classificationChunkSize / 2 if topRow > 0 else 0  # Top left y
+                        offset = (boundBoxChunkSize - classificationChunkSize) / 2
+                        topX = col * classificationChunkSize - offset if col * classificationChunkSize - offset > 0 else 0
+                        topY = row * classificationChunkSize - offset if row * classificationChunkSize - offset > 0 else 0
                         
                         if topX + boundBoxChunkSize > width:
                             topX = width - boundBoxChunkSize

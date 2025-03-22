@@ -98,10 +98,8 @@ def shutdown_threads():
 # Register shutdown function
 atexit.register(shutdown_threads)
 
-@app.before_first_request
-def before_first_request():
-    """Initialize the application before the first request."""
-    start_background_threads()
+# Start background threads when the app is created
+start_background_threads()
 
 @app.route('/test', methods=['GET', 'POST'])
 def test_api():
@@ -463,6 +461,11 @@ def get_server_status():
     except Exception as e:
         logger_handler.log_error(str(e), details=traceback.format_exc())
         return request_handler.create_error_response(str(e), 500)
+
+@app.route('/')
+def index():
+    # your code here
+    return 'Hello World'
 
 if __name__ == '__main__':
     logger_handler.log_system('Starting Flask server on port 8000')

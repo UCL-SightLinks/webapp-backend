@@ -11,7 +11,7 @@ sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".
 from georeference.georeference import georeferenceTIF, georefereceJGW, BNGtoLatLong
 from utils.filterOutput import removeDuplicateBoxesRC, combineChunksToBaseName
 
-def predictionJGW(imageAndDatas, predictionThreshold=0.25, saveLabeledImage=False, outputFolder="run/output", modelType="n"):
+def predictionJGW(imageAndDatas, predictionThreshold=0.25, saveLabeledImage=False, outputFolder="run/output", modelType="n", boundBoxChunkSize=1024, classificationChunkSize=256):
     """
     This function will take all of the segmented image and their georeferencing data from imageAndDatas, where the model then 
     processes the image and  creates a list of bounding boxes. It then takes each bounding box, georeferences it, and then 
@@ -25,6 +25,8 @@ def predictionJGW(imageAndDatas, predictionThreshold=0.25, saveLabeledImage=Fals
         saveLabeledImage (bool): If true, the images with bounding boxes will be saved.
         outputFolder (str): This directs where the model should save the output to.
         modelType (str): The type of model used.
+        boundBoxChunkSize (int): The size of each side of the bounding box image.
+        classificationChunkSize (int): The size of each side of the classification image.
     
     Returns:
         imageDetections (dict): A dictionary where the basename of an image is the key, and the key stores a list of boxes in latitude and longitude, and their respective confidence
@@ -65,12 +67,12 @@ def predictionJGW(imageAndDatas, predictionThreshold=0.25, saveLabeledImage=Fals
                 print(traceback.format_exc())
             pbar.update(1)
         
-    removeDuplicateBoxesRC(imageDetectionsRowCol=imageDetectionsRowCol)
+    removeDuplicateBoxesRC(imageDetectionsRowCol=imageDetectionsRowCol, boundBoxChunkSize=boundBoxChunkSize, classificationChunkSize=classificationChunkSize)
     imageDetections = combineChunksToBaseName(imageDetectionsRowCol=imageDetectionsRowCol)
     return imageDetections
 
 # This version of predictionTIF has filtering
-def predictionTIF(imageAndDatas, predictionThreshold=0.25, saveLabeledImage=False, outputFolder="run/output", modelType="n"):
+def predictionTIF(imageAndDatas, predictionThreshold=0.25, saveLabeledImage=False, outputFolder="run/output", modelType="n", boundBoxChunkSize=1024, classificationChunkSize=256):
     """
     This function will take all of the segmented image and their georeferencing data from imageAndDatas, where the model then 
     processes the image and  creates a list of bounding boxes. It then takes each bounding box, georeferences it, and then 
@@ -84,6 +86,8 @@ def predictionTIF(imageAndDatas, predictionThreshold=0.25, saveLabeledImage=Fals
         saveLabeledImage (bool): If true, the images with bounding boxes will be saved.
         outputFolder (str): This directs where the model should save the output to.
         modelType (str): The type of model used.
+        boundBoxChunkSize (int): The size of each side of the bounding box image.
+        classificationChunkSize (int): The size of each side of the classification image.
     
     Returns:
         imageDetections (dict): A dictionary where the basename of an image is the key, and the key stores a list of boxes in latitude and longitude, and their respective confidence.
@@ -128,6 +132,6 @@ def predictionTIF(imageAndDatas, predictionThreshold=0.25, saveLabeledImage=Fals
                 print(f"Error processing {baseName}: {e}")
                 print(traceback.format_exc())
             pbar.update(1)
-    removeDuplicateBoxesRC(imageDetectionsRowCol=imageDetectionsRowCol)
+    removeDuplicateBoxesRC(imageDetectionsRowCol=imageDetectionsRowCol, boundBoxChunkSize=boundBoxChunkSize, classificationChunkSize=classificationChunkSize)
     imageDetections = combineChunksToBaseName(imageDetectionsRowCol=imageDetectionsRowCol)
     return imageDetections
