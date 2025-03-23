@@ -48,6 +48,14 @@ task_handler = TaskHandler()
 request_handler = RequestHandler(file_handler)
 logger_handler = LoggerHandler()
 
+# Create a wrapper for execute to ensure it only receives expected parameters
+def execute_wrapper(uploadDir, inputType, classificationThreshold, predictionThreshold, saveLabeledImage, outputType, yoloModelType):
+    return execute(uploadDir, inputType, classificationThreshold, predictionThreshold, saveLabeledImage, outputType, yoloModelType)
+
+# Create a special wrapper for queue_processor to protect execute_func at task level
+def queue_processor_wrapper(task_handler, execute_wrapper):
+    task_handler.queue_processor(execute_wrapper)
+
 def start_background_threads():
     """Start background threads if not already running."""
     global background_threads_started
@@ -66,8 +74,8 @@ def start_background_threads():
         
         # Start queue processor thread
         queue_thread = threading.Thread(
-            target=task_handler.queue_processor,
-            args=(execute,),
+            target=queue_processor_wrapper,
+            args=(task_handler, execute_wrapper),
             daemon=True,
             name='queue_thread'
         )
@@ -203,7 +211,7 @@ def predict_api():
             logger_handler.log_file_operation('SAVE', filepath)
         
         # Process directly
-        task_id = task_handler.process_task(None, input_folder, params, execute)
+        task_id = task_handler.process_task(None, input_folder, params, execute_wrapper)
         
         # Get task result
         task = task_handler.get_task_status(task_id)
@@ -225,6 +233,7 @@ def predict_api():
             return request_handler.create_error_response(error_msg, 500)
         
         logger_handler.log_file_operation('SEND', task['zip_path'])
+        
         # Return response based on client preference
         if request_handler.wants_json_response(request):
             return request_handler.create_success_response({
@@ -233,7 +242,20 @@ def predict_api():
                 'output_path': task['zip_path']
             })
         else:
-            return file_handler.send_file_response(task['zip_path'])
+            # FIXED: Use direct send_file instead of file_handler to avoid double-wrapping
+            zip_path = task['zip_path']
+            
+            # Fixed filename for consistency
+            timestamp = datetime.now().strftime("%Y%m%d")
+            filename = f"result_{timestamp}.zip"
+            
+            # Use Flask's send_file directly
+            return send_file(
+                zip_path,
+                mimetype='application/zip',
+                as_attachment=True,
+                download_name=filename
+            )
             
     except ValueError as ve:
         logger_handler.log_error(str(ve))
@@ -302,55 +324,241 @@ def predict_web():
 def get_task_status(task_id):
     """Get task status and progress."""
     try:
+        logger_handler.log_request('GET', f'/web/status/{task_id}')
+        
         task = task_handler.get_task_status(task_id)
         if not task:
+            logger_handler.log_error(f'Task not found: {task_id}')
             return request_handler.create_error_response('Task not found', 404)
         
-        response = {
-            'percentage': task.get('progress', 0),
-            'log': task.get('stage', 'Unknown'),
-            'has_detections': False  # Default to False
-        }
-        
-        # Add error if task failed
-        if task.get('status') == 'failed':
-            response['error'] = task.get('error', 'Unknown error')
-            return request_handler.create_success_response(response)
-        
-        # Add error if task cancelled
-        if task.get('status') == 'cancelled' or task.get('is_cancelled', False):
-            response['error'] = 'Task cancelled by user'
-            return request_handler.create_success_response(response)
-        
-        # Add download token if task completed
-        if task.get('status') == 'completed' and task.get('zip_path'):
-            # Check if there are any detections
-            zip_path = task.get('zip_path')
-            if zip_path and os.path.exists(zip_path):
-                try:
-                    with zipfile.ZipFile(zip_path, 'r') as zf:
-                        for filename in zf.namelist():
-                            if filename.endswith('output.json'):
-                                with zf.open(filename) as f:
-                                    content = f.read()
-                                    if content:
-                                        data = json.loads(content)
-                                        response['has_detections'] = any(
-                                            len(entry.get('coordinates', [])) > 0 
-                                            for entry in data
-                                        )
-                                        break
-                except Exception as e:
-                    logger_handler.log_error(f'Error checking detections: {str(e)}')
+        # Simple status response: false for not completed, true for completed with download available
+        if task.get('status') == 'completed':
+            # First check if the task already has the has_detections flag
+            if 'has_detections' in task:
+                has_detections = task.get('has_detections', False)
+                total_detections = 0  # Will be determined if needed
+                
+                logger_handler.log_system(f'Using stored detection status: {has_detections}')
+                
+                # If we have no detections, we're done
+                if not has_detections:
+                    logger_handler.log_system(f'Task {task_id} has no detections (from stored status)')
+                    # Generate download token for accessing the no_detections.txt file
+                    if task.get('session_id'):
+                        token = auth_handler.generate_download_token(task['session_id'], task_id)
+                        return request_handler.create_success_response({
+                            'completed': True,
+                            'download_token': token,
+                            'has_detections': False
+                        })
+                
+                # For tasks with detections, we need the download token
+                if task.get('session_id') and task.get('zip_path'):
+                    token = auth_handler.generate_download_token(task['session_id'], task_id)
+                    
+                    # Count detections if we need to
+                    if has_detections and 'total_detections' not in task:
+                        # We'll need to count the detections
+                        output_folder = task.get('output_folder')
+                        if not output_folder and task.get('zip_path'):
+                            output_folder = os.path.dirname(task.get('zip_path'))
+                            
+                        if output_folder and os.path.exists(output_folder):
+                            # Try to count from JSON first
+                            json_path = os.path.join(output_folder, "detections.json")
+                            if os.path.exists(json_path) and os.path.getsize(json_path) > 10:
+                                try:
+                                    with open(json_path, 'r') as f:
+                                        data = json.load(f)
+                                        for item in data:
+                                            coordinates = item.get('coordinates', [])
+                                            if isinstance(coordinates, list):
+                                                total_detections += len(coordinates)
+                                        logger_handler.log_system(f'Counted {total_detections} detections from JSON')
+                                except Exception as e:
+                                    logger_handler.log_error(f'Error reading JSON: {str(e)}')
+                    else:
+                        # Use already stored count
+                        total_detections = task.get('total_detections', 0)
+                        
+                    response_data = {
+                        'completed': True,
+                        'download_token': token,
+                        'has_detections': has_detections
+                    }
+                    
+                    # Include total_detections if any were found
+                    if total_detections > 0:
+                        response_data['total_detections'] = total_detections
+                    
+                    return request_handler.create_success_response(response_data)
             
-            # Generate download token
-            if task.get('session_id'):
-                token = auth_handler.generate_download_token(task['session_id'], task_id)
-                response['download_token'] = token
-            else:
-                logger_handler.log_error(f'Missing session_id for completed task: {task_id}')
+            # Fall back to old detection checking logic if necessary
+            # Check if we have a zip path or just an output folder
+            if task.get('zip_path'):
+                # Generate download token
+                if task.get('session_id'):
+                    token = auth_handler.generate_download_token(task['session_id'], task_id)
+                    
+                    # Determine if the task has detections - improved path handling
+                    zip_path = task.get('zip_path', '')
+                    zip_directory = os.path.dirname(zip_path)
+                    session_id = task.get('session_id', '')
+                    
+                    # Check parent directory of zip for output folder structure
+                    output_folder = None
+                    has_detections = False
+                    total_detections = 0
+                    
+                    # Try finding the actual output folder which contains the detection files
+                    # The output folder may be named with the session_id or may be in the same directory as the zip
+                    logger_handler.log_system(f'Checking for detections in session: {session_id}')
+                    
+                    # First check for a folder in run/output with the session_id name
+                    session_output = os.path.join('run/output', session_id)
+                    
+                    if os.path.exists(session_output) and os.path.isdir(session_output):
+                        output_folder = session_output
+                        logger_handler.log_system(f'Found output folder at session path: {output_folder}')
+                    else:
+                        # Next, look for folders in the zip directory that might contain the detection files
+                        possible_folders = []
+                        if os.path.exists(zip_directory) and os.path.isdir(zip_directory):
+                            for item in os.listdir(zip_directory):
+                                item_path = os.path.join(zip_directory, item)
+                                if os.path.isdir(item_path):
+                                    possible_folders.append(item_path)
+                        
+                        if len(possible_folders) == 1:
+                            # If there's only one folder, use it
+                            output_folder = possible_folders[0]
+                            logger_handler.log_system(f'Found single output folder: {output_folder}')
+                        elif len(possible_folders) > 1:
+                            # If there are multiple folders, try to find the one with detection files
+                            for folder in possible_folders:
+                                if os.path.exists(os.path.join(folder, 'detections.json')):
+                                    output_folder = folder
+                                    logger_handler.log_system(f'Found output folder with JSON: {output_folder}')
+                                    break
+                            
+                            if not output_folder:
+                                # If still not found, use the most recently modified folder
+                                possible_folders.sort(key=os.path.getmtime, reverse=True)
+                                output_folder = possible_folders[0]
+                                logger_handler.log_system(f'Using most recent folder: {output_folder}')
+                    
+                    # If we still don't have an output folder, just use the zip directory
+                    if not output_folder:
+                        output_folder = zip_directory
+                        logger_handler.log_system(f'Falling back to zip directory: {output_folder}')
+                    
+                    # Check for the no_detections marker file
+                    no_detections_marker = os.path.join(output_folder, "no_detections.txt")
+                    if os.path.exists(no_detections_marker):
+                        has_detections = False
+                        logger_handler.log_system(f'No detections marker file found: {no_detections_marker}')
+                    else:
+                        # First check for detections.json which is the most reliable source
+                        json_path = os.path.join(output_folder, "detections.json")
+                        
+                        if os.path.exists(json_path) and os.path.getsize(json_path) > 10:
+                            try:
+                                logger_handler.log_system(f'Found JSON output file: {json_path} (size: {os.path.getsize(json_path)})')
+                                with open(json_path, 'r') as f:
+                                    data = json.load(f)
+                                    # Count detections across all images
+                                    for item in data:
+                                        coordinates = item.get('coordinates', [])
+                                        if isinstance(coordinates, list):
+                                            detection_count = len(coordinates)
+                                            total_detections += detection_count
+                                            image_name = item.get('image', 'unknown')
+                                            logger_handler.log_system(f'Image {image_name}: {detection_count} detections')
+                                    
+                                    # If we found any detections in the JSON, set flag to true
+                                    has_detections = total_detections > 0
+                                    logger_handler.log_system(f'Found {total_detections} total detections in JSON data')
+                            except Exception as e:
+                                logger_handler.log_error(f'Error reading JSON: {str(e)}')
+                        
+                        # If no JSON or no detections found in JSON, check TXT files
+                        if not has_detections and os.path.exists(output_folder):
+                            txt_files = [f for f in os.listdir(output_folder) if f.endswith('.txt') and f != "no_detections.txt"]
+                            
+                            if txt_files:
+                                logger_handler.log_system(f'Found {len(txt_files)} TXT files in output folder')
+                                for txt_file in txt_files:
+                                    txt_path = os.path.join(output_folder, txt_file)
+                                    # Count lines as detections
+                                    if os.path.getsize(txt_path) > 0:
+                                        try:
+                                            with open(txt_path, 'r') as f:
+                                                lines = [line.strip() for line in f if line.strip()]
+                                                file_detections = len(lines)
+                                                total_detections += file_detections
+                                                logger_handler.log_system(f'TXT file {txt_file}: {file_detections} detections')
+                                        except Exception as e:
+                                            logger_handler.log_error(f'Error reading TXT file: {str(e)}')
+                                
+                                has_detections = total_detections > 0
+                                logger_handler.log_system(f'Found {total_detections} total detections in TXT files')
+                    
+                    logger_handler.log_system(f'Final detection status: has_detections={has_detections}, total_detections={total_detections}')
+                    
+                    response_data = {
+                        'completed': True,
+                        'download_token': token,
+                        'has_detections': has_detections
+                    }
+                    
+                    # Include total_detections if any were found
+                    if total_detections > 0:
+                        response_data['total_detections'] = total_detections
+                    
+                    return request_handler.create_success_response(response_data)
+            # Handle the case where there's just an output folder (no ZIP)
+            elif task.get('output_folder'):
+                output_folder = task.get('output_folder')
+                no_detections_marker = os.path.join(output_folder, "no_detections.txt")
+                has_detections = not os.path.exists(no_detections_marker)
+                
+                # Generate download token for accessing the no_detections.txt file if needed
+                if task.get('session_id'):
+                    token = auth_handler.generate_download_token(task['session_id'], task_id)
+                    return request_handler.create_success_response({
+                        'completed': True,
+                        'download_token': token,
+                        'has_detections': has_detections
+                    })
+                    
+            # Missing session_id case
+            error_msg = f'Missing session_id for completed task: {task_id}'
+            logger_handler.log_error(error_msg)
+            return request_handler.create_error_response(error_msg, 500)
         
-        return request_handler.create_success_response(response)
+        # Check for error state
+        if task.get('status') == 'failed':
+            error_msg = task.get('error', 'Task processing failed')
+            logger_handler.log_error(f'Task {task_id} failed: {error_msg}')
+            return request_handler.create_success_response({
+                'completed': False,
+                'error': True,
+                'error_message': error_msg
+            })
+        
+        # For cancelled tasks, add a specific response
+        if task.get('status') == 'cancelled':
+            logger_handler.log_task_status(task_id, 'cancelled', stage='Checking cancelled task status')
+            return request_handler.create_success_response({
+                'completed': False,
+                'cancelled': True,
+                'message': 'Task was cancelled'
+            })
+        
+        # For all other states (queued, processing), return false
+        return request_handler.create_success_response({
+            'completed': False
+        })
         
     except Exception as e:
         logger_handler.log_error(str(e), details=traceback.format_exc())
@@ -378,7 +586,86 @@ def download_result(token):
             logger_handler.log_error(f'Task not found for download: {task_id}')
             return request_handler.create_error_response('Task not found', 404)
         
-        # Get and verify zip path
+        # First check if the task has a stored detection status
+        if 'has_detections' in task:
+            has_detections = task.get('has_detections', False)
+            logger_handler.log_system(f'Download: Using stored detection status: {has_detections}')
+            
+            # For tasks without detections, return the no_detections.txt file
+            if not has_detections:
+                # Find the output folder path
+                output_folder = task.get('output_folder')
+                if not output_folder and task.get('zip_path'):
+                    output_folder = os.path.dirname(task.get('zip_path'))
+                
+                if not output_folder or not os.path.exists(output_folder):
+                    logger_handler.log_error(f'Output folder not found for no-detection task: {task_id}')
+                    return request_handler.create_error_response('Output folder not found', 404)
+                
+                # Check for no_detections marker file
+                no_detections_marker = os.path.join(output_folder, "no_detections.txt")
+                if os.path.exists(no_detections_marker):
+                    logger_handler.log_system(f'Sending no_detections marker file for task {task_id}')
+                    timestamp = datetime.now().strftime("%Y%m%d")
+                    response = send_file(
+                        no_detections_marker, 
+                        mimetype='text/plain',
+                        as_attachment=True,
+                        download_name=f'result_{timestamp}.txt'
+                    )
+                    response.headers['X-Has-Detections'] = 'false'
+                    return response
+                else:
+                    # Create a temporary no_detections marker if it doesn't exist
+                    temp_marker = os.path.join(output_folder, "no_detections.txt")
+                    with open(temp_marker, 'w') as f:
+                        f.write("No detections found")
+                    logger_handler.log_system(f'Created and sending temporary no_detections marker for task {task_id}')
+                    response = send_file(
+                        temp_marker, 
+                        mimetype='text/plain',
+                        as_attachment=True,
+                        download_name=f'result_{timestamp}.txt'
+                    )
+                    response.headers['X-Has-Detections'] = 'false'
+                    return response
+            
+            # For tasks with detections, continue with ZIP file download 
+            if has_detections and task.get('zip_path'):
+                zip_path = task.get('zip_path')
+                if not os.path.exists(zip_path):
+                    logger_handler.log_error(f'ZIP file not found at path: {zip_path}')
+                    return request_handler.create_error_response(f'ZIP file not found at path: {zip_path}', 404)
+                
+                file_size = os.path.getsize(zip_path)
+                if file_size == 0:
+                    logger_handler.log_error(f'Empty ZIP file: {zip_path}')
+                    return request_handler.create_error_response('ZIP file is empty', 404)
+                
+                logger_handler.log_system(f'Sending ZIP file with detections for task {task_id}')
+                logger_handler.log_file_operation('DOWNLOAD', zip_path)
+                
+                # Setup proper headers with a consistent filename
+                timestamp = datetime.now().strftime("%Y%m%d")
+                filename = f"result_{timestamp}.zip"
+                
+                # Use Flask's send_file directly to avoid nested ZIPs
+                response = send_file(
+                    zip_path,
+                    mimetype='application/zip',
+                    as_attachment=True,
+                    download_name=filename
+                )
+                
+                # Set detection headers
+                response.headers['X-Has-Detections'] = 'true'
+                if 'total_detections' in task:
+                    response.headers['X-Total-Detections'] = str(task.get('total_detections', 0))
+                
+                logger_handler.log_system(f'File download initiated with filename: {filename}, detections: {task.get("total_detections", 0)}')
+                return response
+                
+        # Get and verify zip path for tasks that don't have stored detection status
         zip_path = task.get('zip_path')
         if not zip_path:
             logger_handler.log_error(f'ZIP path not found for task: {task_id}')
@@ -387,6 +674,122 @@ def download_result(token):
         if not os.path.exists(zip_path):
             logger_handler.log_error(f'ZIP file not found at path: {zip_path}')
             return request_handler.create_error_response(f'ZIP file not found at path: {zip_path}', 404)
+        
+        # Improved detection checking logic similar to get_task_status
+        zip_directory = os.path.dirname(zip_path)
+        session_id = task.get('session_id', '')
+        output_folder = None
+        has_detections = False
+        total_detections = 0
+        
+        # Try finding the actual output folder which contains the detection files
+        logger_handler.log_system(f'Checking for detections for download in session: {session_id}')
+        
+        # First check for a folder in run/output with the session_id name
+        session_output = os.path.join('run/output', session_id)
+        
+        if os.path.exists(session_output) and os.path.isdir(session_output):
+            output_folder = session_output
+            logger_handler.log_system(f'Download: Found output folder at session path: {output_folder}')
+        else:
+            # Next, look for folders in the zip directory that might contain the detection files
+            possible_folders = []
+            if os.path.exists(zip_directory) and os.path.isdir(zip_directory):
+                for item in os.listdir(zip_directory):
+                    item_path = os.path.join(zip_directory, item)
+                    if os.path.isdir(item_path):
+                        possible_folders.append(item_path)
+            
+            if len(possible_folders) == 1:
+                # If there's only one folder, use it
+                output_folder = possible_folders[0]
+                logger_handler.log_system(f'Download: Found single output folder: {output_folder}')
+            elif len(possible_folders) > 1:
+                # If there are multiple folders, try to find the one with detection files
+                for folder in possible_folders:
+                    if os.path.exists(os.path.join(folder, 'detections.json')):
+                        output_folder = folder
+                        logger_handler.log_system(f'Download: Found output folder with JSON: {output_folder}')
+                        break
+                
+                if not output_folder:
+                    # If still not found, use the most recently modified folder
+                    possible_folders.sort(key=os.path.getmtime, reverse=True)
+                    output_folder = possible_folders[0]
+                    logger_handler.log_system(f'Download: Using most recent folder: {output_folder}')
+        
+        # If we still don't have an output folder, just use the zip directory
+        if not output_folder:
+            output_folder = zip_directory
+            logger_handler.log_system(f'Download: Falling back to zip directory: {output_folder}')
+        
+        # Check for the no_detections marker file
+        no_detections_marker = os.path.join(output_folder, "no_detections.txt")
+        if os.path.exists(no_detections_marker):
+            has_detections = False
+            logger_handler.log_system(f'Download: No detections marker file found: {no_detections_marker}')
+        else:
+            # Check for detections.json which is the most reliable source
+            json_path = os.path.join(output_folder, "detections.json")
+            if os.path.exists(json_path) and os.path.getsize(json_path) > 10:
+                try:
+                    with open(json_path, 'r') as f:
+                        data = json.load(f)
+                        # Count detections across all images
+                        for item in data:
+                            coordinates = item.get('coordinates', [])
+                            if isinstance(coordinates, list):
+                                total_detections += len(coordinates)
+                
+                    has_detections = total_detections > 0
+                    logger_handler.log_system(f'Download: Found {total_detections} total detections in JSON data')
+                except Exception as e:
+                    logger_handler.log_error(f'Download: Error reading JSON: {str(e)}')
+            
+            # If no JSON or no detections found in JSON, check TXT files
+            if not has_detections and os.path.exists(output_folder):
+                txt_files = [f for f in os.listdir(output_folder) if f.endswith('.txt') and f != "no_detections.txt"]
+                if txt_files:
+                    for txt_file in txt_files:
+                        txt_path = os.path.join(output_folder, txt_file)
+                        # Count lines as detections if file is not empty
+                        if os.path.getsize(txt_path) > 0:
+                            try:
+                                with open(txt_path, 'r') as f:
+                                    lines = [line.strip() for line in f if line.strip()]
+                                    total_detections += len(lines)
+                            except Exception as e:
+                                logger_handler.log_error(f'Download: Error reading TXT file: {str(e)}')
+                    
+                    has_detections = total_detections > 0
+        
+        logger_handler.log_system(f'Download: Final detection status: has_detections={has_detections}, total_detections={total_detections}')
+        
+        # If no detections were found, we should still return the marker file
+        # but also include a flag in the response so the client knows
+        if not has_detections:
+            logger_handler.log_system(f'No detections found for task {task_id}, sending marker file')
+            # If no_detections marker exists, send it
+            if os.path.exists(no_detections_marker):
+                response = send_file(
+                    no_detections_marker, 
+                    mimetype='text/plain',
+                    as_attachment=True,
+                    download_name=f'result_{timestamp}.txt'
+                )
+            else:
+                # Create a temporary no_detections marker
+                temp_marker = os.path.join(output_folder, "no_detections.txt")
+                with open(temp_marker, 'w') as f:
+                    f.write("No detections found")
+                response = send_file(
+                    temp_marker, 
+                    mimetype='text/plain',
+                    as_attachment=True,
+                    download_name=f'result_{timestamp}.txt'
+                )
+            response.headers['X-Has-Detections'] = 'false'
+            return response
         
         file_size = os.path.getsize(zip_path)
         if file_size == 0:
@@ -414,16 +817,27 @@ def download_result(token):
         
         # Send file
         try:
+            # FIXED: Use direct send_file instead of the file_handler to avoid double-wrapping
+            # Get only the needed data from file_handler.send_file_response
+            logger_handler.log_system(f'Directly sending file: {zip_path}')
+            
+            # Setup proper headers with a consistent filename
+            timestamp = datetime.now().strftime("%Y%m%d")
+            filename = f"result_{timestamp}.zip"
+            
+            # Use Flask's send_file directly to avoid nested ZIPs
             response = send_file(
                 zip_path,
+                mimetype='application/zip',
                 as_attachment=True,
-                download_name='result.zip',
-                mimetype='application/zip'
+                download_name=filename
             )
-            response.headers['Content-Length'] = file_size
-            response.headers['Content-Type'] = 'application/zip'
-            response.headers['Content-Disposition'] = 'attachment; filename=result.zip'
-            logger_handler.log_system(f'File download initiated: {zip_path}')
+            
+            # Set X-Has-Detections header
+            response.headers['X-Has-Detections'] = 'true'
+            response.headers['X-Total-Detections'] = str(total_detections)
+            logger_handler.log_system(f'File download initiated with filename: {filename}, detections: {total_detections}')
+            
             return response
         except Exception as e:
             logger_handler.log_error(f'File send failed: {str(e)}')

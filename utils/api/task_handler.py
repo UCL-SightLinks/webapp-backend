@@ -21,8 +21,9 @@ class TaskHandler:
         """Initialize task handler with configuration."""
         self.BASE_UPLOAD_FOLDER = 'input'
         self.BASE_OUTPUT_FOLDER = 'run/output'
+        self.BASE_EXTRACT_FOLDER = 'run/extract'
         self.MAX_FILE_AGE_HOURS = 2  # For input files
-        self.MAX_OUTPUT_AGE_HOURS = 4  # For output files and zips
+        self.MAX_OUTPUT_AGE_HOURS = 2  # For output files and zips
         self.MAX_QUEUE_SIZE = 10
         self.MAX_CONCURRENT_TASKS = 5
 
@@ -297,6 +298,26 @@ class TaskHandler:
                 except Exception as e:
                     self.logger.log_error(f'Error cleaning up input folder: {str(e)}')
 
+            # Clean up extract directory
+            try:
+                # Extract directory is named with the same timestamp as the task
+                session_id = task.get('session_id')
+                if session_id:
+                    # Extract timestamp from session_id (format: YYYYMMDD_HHMMSS_uuid)
+                    timestamp = '_'.join(session_id.split('_')[:2])
+                    extract_base_dir = 'run/extract'
+                    
+                    # Look for extract directories with matching timestamp
+                    if os.path.exists(extract_base_dir):
+                        for dir_name in os.listdir(extract_base_dir):
+                            if dir_name.startswith(timestamp):
+                                extract_dir = os.path.join(extract_base_dir, dir_name)
+                                if os.path.exists(extract_dir):
+                                    shutil.rmtree(extract_dir)
+                                    self.logger.log_cleanup('extract_dir', extract_dir)
+            except Exception as e:
+                self.logger.log_error(f'Error cleaning up extract directory: {str(e)}')
+
             self.logger.log_task_status(task_id, 'cancelled', progress=100, stage='Cancelled by user')
             return True
 
@@ -359,6 +380,25 @@ class TaskHandler:
 
                 if not output_folder or not os.path.exists(output_folder):
                     raise Exception("No output folder was generated")
+                    
+                # Check if there were no detections
+                no_detections_marker = os.path.join(output_folder, "no_detections.txt")
+                if os.path.exists(no_detections_marker):
+                    self.logger.log_system(f"No detections found for task {task_id}")
+                    # Update task status to completed but mark as no detections
+                    with self.task_lock:
+                        current_task = self.active_tasks.get(task_id)
+                        if current_task and not current_task.get('is_cancelled', False):
+                            current_task.update({
+                                'status': 'completed',
+                                'progress': 100,
+                                'stage': 'Completed - No Detections',
+                                'has_detections': False,
+                                'output_folder': output_folder,
+                                'session_id': session_id  # Ensure session_id is preserved
+                            })
+                            self.active_tasks[task_id] = current_task
+                    return task_id
 
                 # Check if task was cancelled during execution
                 with self.task_lock:
@@ -384,9 +424,18 @@ class TaskHandler:
                             'progress': 100,
                             'stage': 'Completed',
                             'zip_path': zip_path,
+                            'has_detections': True,
                             'session_id': session_id  # Ensure session_id is preserved
                         })
                         self.active_tasks[task_id] = current_task
+
+                # Clean up input folder after successful task completion
+                if input_folder and os.path.exists(input_folder):
+                    try:
+                        shutil.rmtree(input_folder)
+                        self.logger.log_cleanup('input_folder', input_folder)
+                    except Exception as e:
+                        self.logger.log_error(f'Error cleaning up input folder: {str(e)}')
 
                 return task_id
 
@@ -413,6 +462,33 @@ class TaskHandler:
                                 'session_id': session_id  # Ensure session_id is preserved
                             })
                         self.active_tasks[task_id] = current_task
+
+                # Clean up input folder after task failure
+                if input_folder and os.path.exists(input_folder):
+                    try:
+                        shutil.rmtree(input_folder)
+                        self.logger.log_cleanup('input_folder', input_folder)
+                    except Exception as e:
+                        self.logger.log_error(f'Error cleaning up input folder after failure: {str(e)}')
+                        
+                # Clean up extract directory after task failure
+                try:
+                    # Extract timestamp from session_id (format: YYYYMMDD_HHMMSS_uuid)
+                    if session_id:
+                        timestamp = '_'.join(session_id.split('_')[:2])
+                        extract_base_dir = 'run/extract'
+                        
+                        # Look for extract directories with matching timestamp
+                        if os.path.exists(extract_base_dir):
+                            for dir_name in os.listdir(extract_base_dir):
+                                if dir_name.startswith(timestamp):
+                                    extract_dir = os.path.join(extract_base_dir, dir_name)
+                                    if os.path.exists(extract_dir):
+                                        shutil.rmtree(extract_dir)
+                                        self.logger.log_cleanup('extract_dir', extract_dir)
+                except Exception as e:
+                    self.logger.log_error(f'Error cleaning up extract directory after failure: {str(e)}')
+                
                 raise
 
         except Exception as e:
@@ -435,62 +511,195 @@ class TaskHandler:
                         'session_id': session_id,  # Ensure session_id is preserved
                         'is_cancelled': False
                     }
+            
+            # Clean up input folder in case of unexpected error
+            if input_folder and os.path.exists(input_folder):
+                try:
+                    shutil.rmtree(input_folder)
+                    self.logger.log_cleanup('input_folder', input_folder)
+                except Exception as cleanup_error:
+                    self.logger.log_error(f'Error cleaning up input folder in outer exception: {str(cleanup_error)}')
+            
+            # Clean up extract directory in case of unexpected error
+            try:
+                # Extract timestamp from session_id (format: YYYYMMDD_HHMMSS_uuid)
+                if session_id:
+                    timestamp = '_'.join(session_id.split('_')[:2])
+                    extract_base_dir = 'run/extract'
+                    
+                    # Look for extract directories with matching timestamp
+                    if os.path.exists(extract_base_dir):
+                        for dir_name in os.listdir(extract_base_dir):
+                            if dir_name.startswith(timestamp):
+                                extract_dir = os.path.join(extract_base_dir, dir_name)
+                                if os.path.exists(extract_dir):
+                                    shutil.rmtree(extract_dir)
+                                    self.logger.log_cleanup('extract_dir', extract_dir)
+            except Exception as cleanup_error:
+                self.logger.log_error(f'Error cleaning up extract directory in outer exception: {str(cleanup_error)}')
+                    
             return task_id
 
     def _execute_task(self, task_id, input_folder, params, execute_func):
         """Execute the task with proper progress tracking and cancellation checks."""
         try:
-            def progress_callback(stage, progress):
-                if task_id in self.active_tasks:
-                    self.active_tasks[task_id].update({
-                        'progress': progress,
-                        'stage': stage
-                    })
-
             # Check for cancellation before starting execution
             if self.check_cancellation(task_id):
                 raise Exception("Task cancelled by user")
 
-            # Execute the task
-            output_folder = execute_func(
+            # Extract timestamp from session_id for extract directory cleanup if needed
+            session_id = os.path.basename(input_folder)
+            extract_dir = None
+            
+            # Create a local wrapper to ensure we only pass the expected parameters
+            # and properly handle cancellation during execution
+            def safe_execute_wrapper(uploadDir, inputType, classificationThreshold, predictionThreshold, saveLabeledImage, outputType, yoloModelType):
+                # Store the extract directory for cleanup if task is cancelled
+                nonlocal extract_dir
+                
+                # Create a cancellation check function that will be called periodically
+                def check_cancel():
+                    # Check if task was cancelled during execution
+                    if self.check_cancellation(task_id):
+                        # If cancelled, clean up the extract directory
+                        if extract_dir and os.path.exists(extract_dir):
+                            try:
+                                self.logger.log_system(f"Cleaning up extract directory due to cancellation: {extract_dir}")
+                                shutil.rmtree(extract_dir)
+                                self.logger.log_cleanup('extract_dir_during_execution', extract_dir)
+                            except Exception as e:
+                                self.logger.log_error(f"Error cleaning up extract directory during cancellation: {str(e)}")
+                        
+                        # Raise exception to terminate execution
+                        raise Exception("Task cancelled by user during execution")
+                
+                # Create a wrapper around the execute function that periodically checks for cancellation
+                result = None
+                try:
+                    # Patch the time.sleep function to check for cancellation periodically
+                    original_sleep = time.sleep
+                    
+                    def patched_sleep(seconds):
+                        # Break long sleeps into smaller chunks to check for cancellation more frequently
+                        chunk_size = 0.5  # Check every half second
+                        remaining = seconds
+                        
+                        while remaining > 0:
+                            check_cancel()
+                            sleep_time = min(chunk_size, remaining)
+                            original_sleep(sleep_time)
+                            remaining -= sleep_time
+                    
+                    # Temporarily replace time.sleep with our patched version
+                    time.sleep = patched_sleep
+                    
+                    # Set up the cancellation callback for the main execute function
+                    import sys
+                    sys._task_cancelled_callback = check_cancel
+                    
+                    # Execute the function, tracking any extract directory it creates
+                    result = execute_func(uploadDir, inputType, classificationThreshold, predictionThreshold, saveLabeledImage, outputType, yoloModelType)
+                    
+                    # Look for extract directory that might have been created
+                    if not extract_dir:
+                        timestamp = '_'.join(session_id.split('_')[:2])
+                        extract_base_dir = 'run/extract'
+                        
+                        if os.path.exists(extract_base_dir):
+                            for dir_name in os.listdir(extract_base_dir):
+                                if dir_name.startswith(timestamp):
+                                    extract_dir = os.path.join(extract_base_dir, dir_name)
+                                    break
+                    
+                    return result
+                    
+                finally:
+                    # Restore original sleep function
+                    time.sleep = original_sleep
+                    
+                    # Remove the cancellation callback
+                    if hasattr(sys, '_task_cancelled_callback'):
+                        delattr(sys, '_task_cancelled_callback')
+                    
+                    # Final cancellation check before returning
+                    check_cancel()
+                    
+                    return result
+            
+            # Execute the task using the safe wrapper
+            output_folder = safe_execute_wrapper(
                 input_folder,
                 params['input_type'],
                 params['classification_threshold'],
                 params['prediction_threshold'],
                 params['save_labeled_image'],
                 params['output_type'],
-                params['yolo_model_type'],
-                progress_callback,
-                lambda: self.check_cancellation(task_id)
+                params['yolo_model_type']
             )
 
             return output_folder
 
         except Exception as e:
             self.logger.log_error(f"Task execution failed: {str(e)}")
+            
+            # Clean up any possible lingering callback
+            import sys
+            if hasattr(sys, '_task_cancelled_callback'):
+                delattr(sys, '_task_cancelled_callback')
+            
+            # If the task was cancelled, make sure the extract directory is cleaned up
+            if self.check_cancellation(task_id):
+                # Clean up extract directory if task was cancelled
+                session_id = os.path.basename(input_folder)
+                timestamp = '_'.join(session_id.split('_')[:2]) if session_id else ""
+                
+                if timestamp:
+                    extract_base_dir = 'run/extract'
+                    
+                    if os.path.exists(extract_base_dir):
+                        for dir_name in os.listdir(extract_base_dir):
+                            if dir_name.startswith(timestamp):
+                                extract_dir = os.path.join(extract_base_dir, dir_name)
+                                if os.path.exists(extract_dir):
+                                    try:
+                                        self.logger.log_system(f"Cleaning up extract directory after cancellation: {extract_dir}")
+                                        shutil.rmtree(extract_dir)
+                                        self.logger.log_cleanup('extract_dir_after_cancel', extract_dir)
+                                    except Exception as cleanup_err:
+                                        self.logger.log_error(f"Error cleaning up extract directory after cancellation: {str(cleanup_err)}")
+
             raise
 
     def _create_zip_file(self, task_id, output_folder):
         """Create a ZIP file for the task."""
         try:
-            # Create ZIP file
-            zip_name = f"{os.path.basename(output_folder)}.zip"
+            # Get descriptor for the zip file name based on detection status
+            descriptor = "detections"
+            has_detections = True
+            
+            # Check if there were any detections by looking for the marker file
+            no_detections_marker = os.path.join(output_folder, "no_detections.txt")
+            if os.path.exists(no_detections_marker):
+                descriptor = "no-detections"
+                has_detections = False
+            
+            # Use a simple name format for the zip file
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            zip_name = f"result_{timestamp}.zip"
             zip_path = os.path.join(os.path.dirname(output_folder), zip_name)
 
-            self.logger.log_system(f'Creating ZIP file for task {task_id}')
+            self.logger.log_system(f'Creating ZIP file for task {task_id} at {zip_path}')
 
             if os.path.exists(zip_path):
                 os.remove(zip_path)
                 self.logger.log_cleanup('old_zip', zip_path)
 
             with zipfile.ZipFile(zip_path, 'w', zipfile.ZIP_DEFLATED) as zipf:
+                # Get all files in the output folder
                 for root, _, files in os.walk(output_folder):
                     for file in files:
                         if self.check_cancellation(task_id):
                             # Clean up all resources on cancellation
-                            if input_folder and os.path.exists(input_folder):
-                                shutil.rmtree(input_folder)
-                                self.logger.log_cleanup('input_folder', input_folder)
                             if output_folder and os.path.exists(output_folder):
                                 shutil.rmtree(output_folder)
                                 self.logger.log_cleanup('output_folder', output_folder)
@@ -498,11 +707,34 @@ class TaskHandler:
                                 os.remove(zip_path)
                                 self.logger.log_cleanup('zip_file', zip_path)
                             raise Exception("Task cancelled during ZIP creation")
+                            
+                        # Get the full file path
                         file_path = os.path.join(root, file)
-                        arcname = os.path.relpath(file_path, output_folder)
-                        self.logger.log_file_operation('ZIP_ADD', arcname)
-                        zipf.write(file_path, arcname)
-
+                        
+                        # Create a relative path for the archive
+                        # This ensures files are at the right level without excessive nesting
+                        rel_path = os.path.relpath(file_path, output_folder)
+                        
+                        # Log and add the file to the ZIP
+                        self.logger.log_file_operation('ZIP_ADD', rel_path)
+                        zipf.write(file_path, rel_path)
+            
+            # Verify the zip file was created properly
+            if not os.path.exists(zip_path):
+                raise Exception(f"ZIP file was not created at {zip_path}")
+                
+            # Verify zip file integrity
+            with zipfile.ZipFile(zip_path, 'r') as verify_zip:
+                # Test if any files in the archive are corrupted
+                bad_file = verify_zip.testzip()
+                if bad_file:
+                    raise Exception(f"ZIP file is corrupted. Bad file: {bad_file}")
+                
+                # Verify the zip has contents
+                if len(verify_zip.namelist()) == 0:
+                    raise Exception("ZIP file is empty")
+                    
+            self.logger.log_system(f'Successfully created and verified ZIP file: {zip_path}')
             return zip_path
 
         except Exception as e:
@@ -648,6 +880,7 @@ class TaskHandler:
         while not self.shutdown_flag.is_set():
             try:
                 current_time = datetime.now()
+                self.logger.log_system(f'Running scheduled cleanup at {current_time.strftime("%Y-%m-%d %H:%M:%S")}')
 
                 with self.task_lock:
                     # Get list of active tasks to prevent cleaning up in-use folders
@@ -658,6 +891,10 @@ class TaskHandler:
                     active_output_folders = {
                         os.path.dirname(task.get('zip_path', '')) for task in self.active_tasks.values()
                         if task.get('status') == 'completed' and task.get('zip_path')
+                    }
+                    active_extract_folders = {
+                        task.get('extract_dir') for task in self.active_tasks.values()
+                        if task.get('status') in ['queued', 'processing'] and task.get('extract_dir')
                     }
 
                     # Clean up old tasks from active_tasks ONLY if they are in a final state
@@ -678,6 +915,8 @@ class TaskHandler:
 
                 # Clean up input folders
                 if os.path.exists(self.BASE_UPLOAD_FOLDER):
+                    self.logger.log_system(f'Checking for old input folders in {self.BASE_UPLOAD_FOLDER}')
+                    input_folders_cleaned = 0
                     for folder in os.listdir(self.BASE_UPLOAD_FOLDER):
                         if self.shutdown_flag.is_set():
                             break
@@ -688,15 +927,62 @@ class TaskHandler:
 
                         if os.path.isdir(path):
                             try:
-                                folder_time = datetime.strptime(folder.split('_')[0] + '_' + folder.split('_')[1], '%Y%m%d_%H%M%S')
-                                if current_time - folder_time > timedelta(hours=self.MAX_FILE_AGE_HOURS):
+                                # Check folder age by timestamp format or modification time
+                                is_old = False
+                                
+                                # First try to parse from folder name
+                                try:
+                                    folder_time = datetime.strptime(folder.split('_')[0] + '_' + folder.split('_')[1], '%Y%m%d_%H%M%S')
+                                    if current_time - folder_time > timedelta(hours=self.MAX_FILE_AGE_HOURS):
+                                        is_old = True
+                                except (ValueError, IndexError):
+                                    # If we can't parse from name, use modification time
+                                    mod_time = datetime.fromtimestamp(os.path.getmtime(path))
+                                    if current_time - mod_time > timedelta(hours=self.MAX_FILE_AGE_HOURS):
+                                        is_old = True
+                                
+                                if is_old:
                                     shutil.rmtree(path)
+                                    input_folders_cleaned += 1
                                     self.logger.log_cleanup('old_input', path)
-                            except (ValueError, IndexError):
-                                continue
+                            except Exception as e:
+                                self.logger.log_error(f'Error cleaning input folder {path}: {str(e)}')
+                    
+                    if input_folders_cleaned > 0:
+                        self.logger.log_system(f'Cleaned up {input_folders_cleaned} old input folders')
+
+                # Clean up extract directories
+                if os.path.exists(self.BASE_EXTRACT_FOLDER):
+                    self.logger.log_system(f'Checking for old extract folders in {self.BASE_EXTRACT_FOLDER}')
+                    extract_folders_cleaned = 0
+                    for folder in os.listdir(self.BASE_EXTRACT_FOLDER):
+                        if self.shutdown_flag.is_set():
+                            break
+                            
+                        path = os.path.join(self.BASE_EXTRACT_FOLDER, folder)
+                        if path in active_extract_folders:
+                            continue
+                            
+                        if os.path.isdir(path):
+                            try:
+                                # Use modification time to determine age
+                                mod_time = datetime.fromtimestamp(os.path.getmtime(path))
+                                if current_time - mod_time > timedelta(hours=self.MAX_FILE_AGE_HOURS):
+                                    shutil.rmtree(path)
+                                    extract_folders_cleaned += 1
+                                    self.logger.log_cleanup('old_extract', path)
+                            except Exception as e:
+                                self.logger.log_error(f'Error cleaning extract folder {path}: {str(e)}')
+                    
+                    if extract_folders_cleaned > 0:
+                        self.logger.log_system(f'Cleaned up {extract_folders_cleaned} old extract folders')
 
                 # Clean up output folders and ZIP files
                 if os.path.exists(self.BASE_OUTPUT_FOLDER):
+                    self.logger.log_system(f'Checking for old output folders and ZIP files in {self.BASE_OUTPUT_FOLDER}')
+                    output_cleaned = 0
+                    zip_cleaned = 0
+                    
                     for item in os.listdir(self.BASE_OUTPUT_FOLDER):
                         if self.shutdown_flag.is_set():
                             break
@@ -706,23 +992,48 @@ class TaskHandler:
                             continue
 
                         try:
-                            timestamp = item.split('_')[0] + '_' + item.split('_')[1]
-                            folder_time = datetime.strptime(timestamp, '%Y%m%d_%H%M%S')
-
-                            if current_time - folder_time > timedelta(hours=self.MAX_OUTPUT_AGE_HOURS):
+                            is_old = False
+                            # First try to parse from item name (for folders and ZIP files)
+                            try:
+                                if item.startswith('result_'):
+                                    parts = item[7:].split('_')  # Remove 'result_' prefix
+                                    if len(parts) >= 2:
+                                        timestamp = parts[0] + '_' + parts[1]
+                                        folder_time = datetime.strptime(timestamp, '%Y%m%d_%H%M%S')
+                                        if current_time - folder_time > timedelta(hours=self.MAX_OUTPUT_AGE_HOURS):
+                                            is_old = True
+                                else:
+                                    # Try the old format too with session IDs
+                                    timestamp = item.split('_')[0] + '_' + item.split('_')[1]
+                                    folder_time = datetime.strptime(timestamp, '%Y%m%d_%H%M%S')
+                                    if current_time - folder_time > timedelta(hours=self.MAX_OUTPUT_AGE_HOURS):
+                                        is_old = True
+                            except (ValueError, IndexError):
+                                # If we can't parse from name, use modification time
+                                mod_time = datetime.fromtimestamp(os.path.getmtime(path))
+                                if current_time - mod_time > timedelta(hours=self.MAX_OUTPUT_AGE_HOURS):
+                                    is_old = True
+                            
+                            if is_old:
                                 if os.path.isdir(path):
                                     shutil.rmtree(path)
+                                    output_cleaned += 1
                                     self.logger.log_cleanup('old_output_folder', path)
                                 elif item.endswith('.zip'):
                                     os.remove(path)
+                                    zip_cleaned += 1
                                     self.logger.log_cleanup('old_zip', path)
-                        except (ValueError, IndexError):
-                            continue
+                        except Exception as e:
+                            self.logger.log_error(f'Error cleaning output {path}: {str(e)}')
+                    
+                    if output_cleaned > 0 or zip_cleaned > 0:
+                        self.logger.log_system(f'Cleaned up {output_cleaned} output folders and {zip_cleaned} ZIP files')
 
             except Exception as e:
                 self.logger.log_error(f'Cleanup error: {str(e)}', details=traceback.format_exc())
 
-            # Sleep for 30 minutes or until shutdown
+            # Sleep for 30 minutes or until shutdown (using smaller increments to allow faster shutdown)
+            self.logger.log_system('Cleanup complete, next run in 30 minutes')
             for _ in range(30):  # 30 minutes in 1-minute intervals
                 if self.shutdown_flag.is_set():
                     break

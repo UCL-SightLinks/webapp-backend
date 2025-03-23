@@ -108,18 +108,26 @@ Base URL: http://localhost:8000
    Description: Get task status and progress
    Response:
    {
-     "percentage": 0-100,           # Progress percentage
-     "log": string,                 # Current stage or status message
-     "has_detections": boolean,     # Whether any detections were found (for completed tasks)
-     "download_token": string,      # Included when task is completed
-     "error": string                # Included when task has failed or been cancelled
+     "completed": boolean,          # false for not completed, true for completed
+     "download_token": string,      # Included only when completed is true
+     "has_detections": boolean,     # Indicates if any objects were detected (when completed is true)
+     "total_detections": integer    # Total number of detections found (only included when detections exist)
+   }
+   
+   Error State Response:
+   {
+     "completed": false,
+     "error": true,
+     "error_message": string        # Description of the error that occurred
    }
    
    Notes:
-   - For queued tasks, the log will contain "Waiting in queue (position X)"
-   - For processing tasks, the log will show the current processing stage
-   - For completed tasks, a download_token will be included
-   - The has_detections flag indicates whether any object detections were found
+   - When completed is false, the task is either queued, processing, failed, or cancelled
+   - When completed is true, a download_token will be included for downloading results
+   - When completed is true, has_detections indicates if any objects were found
+   - When no objects are detected, a marker file is created but has_detections will be false
+   - When has_detections is true, total_detections provides the count of all detected objects
+   - When error is true, an error_message will explain what went wrong
    
    Error Response (404):
    {
@@ -131,9 +139,17 @@ Base URL: http://localhost:8000
    Method: GET
    Description: Download processed results using token
    Response: 
-   - Content-Type: application/zip
-   - Content-Disposition: attachment; filename=result.zip
-   - Content-Length: file size in bytes
+   - When has_detections is true:
+     - Content-Type: application/zip
+     - Content-Disposition: attachment; filename=result_YYYYMMDD.zip
+     - Content-Length: file size in bytes
+     - X-Has-Detections: 'true'
+     - X-Total-Detections: count (when available)
+   
+   - When has_detections is false:
+     - Content-Type: text/plain  
+     - Content-Disposition: attachment; filename=result_YYYYMMDD.txt
+     - X-Has-Detections: 'false'
    
    Token Verification Process:
    - Tokens are generated using JWT (JSON Web Tokens)
@@ -141,6 +157,11 @@ Base URL: http://localhost:8000
    - Tokens expire after 2 hours (MAX_TOKEN_AGE_HOURS)
    - Tokens are verified using auth_handler.verify_download_token
    - ZIP file integrity is verified before sending
+   
+   Notes:
+   - When no objects are detected in any image, a text file is returned instead of a ZIP
+   - The X-Has-Detections header can be used to determine if any detections were found
+   - Clients should check the Task Status endpoint before downloading to know what to expect
    
    Error Responses:
    - 401: Invalid token or token payload
@@ -162,6 +183,8 @@ Base URL: http://localhost:8000
    - Removes task from processing queue if queued
    - Terminates execution if task is processing
    - Cleans up input/output folders for the task
+   - Cleans up extract directory if it exists
+   - Immediately stops any ongoing processing
    
    Error Response (404):
    {
@@ -201,6 +224,7 @@ Additional Information:
   - Queue processor thread for handling tasks
 - Error responses include stack traces in development mode
 - All endpoints support error handling with appropriate status codes
+- Task errors are tracked and reported via the status API endpoint
 - File operations are logged for debugging and monitoring
 - ZIP file integrity is verified before download
 
@@ -227,9 +251,13 @@ File Management:
 - Each task creates a unique session ID: timestamp_uuid
 - Files are uploaded to: input/{session_id}/
 - Processing results saved to: run/output/{session_id}/
-- Results are compressed into a ZIP file after processing
+- Results are compressed into a ZIP file with standardized name format: result_YYYYMMDD_HHMMSS.zip
+- ZIP files always download as result_YYYYMMDD.zip with the current date
+- Detection results are saved in a file named detections.json instead of output.json
+- ZIP file integrity is verified after creation:
+  - Files are added at the proper root level without nested folders
+  - ZIP structure is tested for corruption
 - Original directories are deleted after successful compression
-- ZIP file integrity is verified after creation
 
 Parameter Validation:
 - input_type: Must be '0' (Image Data) or '1' (GeoTIFF Data)
@@ -239,9 +267,27 @@ Parameter Validation:
 - output_type: String '0' (JSON) or '1' (TXT), default '0'
 - yolo_model_type: String 'n', 's', or 'm', default 'n'
 
-Task Queue Management:
-- Tasks are queued with a position number when server is busy
-- Task position is updated as other tasks complete or are cancelled
-- Maximum concurrent tasks is enforced by task_handler.MAX_CONCURRENT_TASKS
-- Maximum queue size is enforced by task_handler.MAX_QUEUE_SIZE
+Task Execution:
+- Tasks are executed using the execute() function from main.py
+- The function accepts the following parameters:
+  - uploadDir: Input directory containing files to process
+  - inputType: '0' for image data, '1' for GeoTIFF data
+  - classificationThreshold: Classification confidence threshold (default: 0.35)
+  - predictionThreshold: Prediction confidence threshold (default: 0.5)
+  - saveLabeledImage: Whether to save labeled images (default: False)
+  - outputType: Output format type (default: '0')
+  - yoloModelType: YOLO model size (default: 'n')
+- Tasks can be cancelled at any time:
+  - Cancellation checks happen at key processing points
+  - Cancelled tasks are immediately terminated
+  - All resources (input, output, extract directories) are cleaned up
+  - Cancellation status is updated immediately
+
+Implementation Notes:
+- Input files are cleaned up after task completion (success or failure)
+- Extract directories are cleaned up after task completion or cancellation
+- Output ZIP files are retained for download based on MAX_OUTPUT_AGE_HOURS (default: 4 hours)
+- ZIP file integrity is verified to ensure downloadable results are not corrupted
+- Standardized naming ensures consistent client experience
+- has_detections flag in status API indicates if any objects were found during processing
 """

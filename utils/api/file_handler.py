@@ -54,34 +54,51 @@ class FileHandler:
         return session_id, input_folder
     
     def send_file_response(self, filepath):
-        """Send a file as a response.
-        
+        """Create a file response.
+
         Args:
-            filepath (str): Path to the file to send
-            
+            filepath (str): Path to the file to send.
+
         Returns:
-            Response: Flask response object
+            flask.Response: A response object with the file attached.
         """
         try:
+            logger_handler.log_debug(f"Sending file: {filepath}")
+            
+            # Check if file exists
             if not os.path.exists(filepath):
-                raise FileNotFoundError(f"File not found: {filepath}")
-                
+                logger_handler.log_error(f"File does not exist: {filepath}")
+                return request_handler.create_error_response(f"File not found: {filepath}", 404)
+            
+            # Get file size
             file_size = os.path.getsize(filepath)
             if file_size == 0:
-                raise ValueError("File is empty")
-                
-            response = send_file(
-                filepath,
-                as_attachment=True,
-                download_name=os.path.basename(filepath),
-                mimetype='application/zip'
-            )
-            response.headers['Content-Length'] = file_size
-            response.headers['Content-Type'] = 'application/zip'
-            response.headers['Content-Disposition'] = f'attachment; filename={os.path.basename(filepath)}'
-            return response
+                logger_handler.log_error(f"File is empty: {filepath}")
+                return request_handler.create_error_response(f"File is empty: {filepath}", 500)
             
+            # Get file extension to determine mime type
+            _, ext = os.path.splitext(filepath)
+            
+            # Set MIME type based on extension
+            mime_type = 'application/octet-stream'  # Default
+            if ext.lower() == '.zip':
+                mime_type = 'application/zip'
+            elif ext.lower() == '.json':
+                mime_type = 'application/json'
+            elif ext.lower() == '.txt':
+                mime_type = 'text/plain'
+            
+            # Fixed filename for consistency
+            filename = "results" + ext
+            
+            # Use Flask's send_file directly
+            logger_handler.log_debug(f"Sending file {filepath} as {filename} with MIME type {mime_type}")
+            return send_file(
+                filepath,
+                mimetype=mime_type,
+                as_attachment=True,
+                download_name=filename
+            )
         except Exception as e:
-            print(f"Error sending file: {str(e)}")
-            print("Traceback:", traceback.format_exc())
-            raise 
+            logger_handler.log_error(f"Error sending file: {str(e)}", details=traceback.format_exc())
+            return request_handler.create_error_response(f"Error sending file: {str(e)}", 500) 
