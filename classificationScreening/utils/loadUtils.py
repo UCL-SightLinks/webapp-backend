@@ -10,7 +10,6 @@ import matplotlib.pyplot as plt
 from matplotlib.patches import Polygon as PltPolygon
 import random
 
-# Should eventually be moved to a settings class
 zebra_labels = "zebra_annotations/txt_annotations"
 zebra_images = "zebra_annotations/zebra_images"
 save_dir = "zebra_annotations/classification_data"
@@ -19,6 +18,20 @@ segments = 4
 # Each box has format (x_1, y_1, x_2, y_2) - this does mean this is an estimate.
 # box_1 is the bounding box of the crosswalk, and box_2 is that of the tile.
 def check_box_intersection(box_1, box_2, threshold=0.6):
+    """
+    A variant of Intersection-over-Union calculations that takes into consideration the relative scale
+    difference between the two input boxes by scaling the smaller bounding box by the difference factor.
+    Otherwise the calculation process is the same
+
+    Args:
+        box_1 (float tuple): A pair of (x, y) coordinates forming a non-zero area box (does not have to be regular)
+        box_2 (float tuple): A pair of (x, y) coordinates forming a non-zero area box (does not have to be regular)
+        thresold (float): The minimum scaled IoU value required for the boxes to be classified as intersecting
+
+    Returns:
+        intersection (boolean): Whether the boxes overlap according to the given threshold
+    """
+
     # Threshold is the min IoU required to consider it as having a crosswalk - the minimum percent area of the crosswalk that must be in the tile
     formatted_box_1 = [[box_1[0], box_1[1]], [box_1[2], box_1[1]], [box_1[2], box_1[3]], [box_1[0], box_1[3]]]  # Formatting follows shapely clockwise system
 
@@ -36,6 +49,22 @@ def check_box_intersection(box_1, box_2, threshold=0.6):
         return False
 
 def load_yaml_database(yaml_path):
+    """
+    Gives the structure of a YAML database, required for loading in new YOLO datasets - which we do not do in
+    our case, but can be useful for importing your own datasets.
+
+    Args:
+        yaml_path (string): The path to the yaml database configuration file
+
+    Returns:
+        (train_dir, valid_dir, test_dir), (image_size, classes):
+            train_dir (string): The path to the directory containing the training data
+            valid_dir (string): The path to the directory containing the validation data
+            test_dir (string): The path to the directory containing the testing data
+            image_size (int array): The dimensions of the image in terms of width, height, channels, etc.
+            classes (string array): The names of the different classes represented within the dataset.
+    
+    """
     config_file = None
 
     with open(yaml_path, "r") as file:
@@ -51,10 +80,29 @@ def load_yaml_database(yaml_path):
     # Returns in format (directories, label_description)
     return (train_dir, valid_dir, test_dir), (image_size, classes)
 
-
-# Takes in a entity database, labelled for bounding box regression, and breaks down the images into
-# smaller images, with labels for classification training
 def convert_database_to_segments(image_dir, label_dir, dst_dir, overwrite=False):
+    """
+    Takes in an annotated dataset in the format described in the data annotation section (which can be
+    found on our website) labelled for bounding box detection, and segmented the images into smaller images
+    with labels for classification training. 
+    
+    Data is saved directly into the target directory as png files, with the associated labels being saved 
+    directly as well as txt files with the same name as its associated image. All data is saved with a name 
+    corresponding to its index.
+    
+    Args:
+        image_dir (string): The path to the directory containing the image data (must be stored as one 
+            of the following format: ('.jpg', '.jpeg', '.png') )
+        label_dir (string): The path to the directory containing the label data (must be stored in text)
+        dst_dir (string): The path to the directory where the data will be stored - will be overwritten
+            if that setting has been enabled, and will be created if it doesn't exist yet.
+        overwrite (boolean): Whether to delete the current data
+    
+    Returns:
+        None
+    
+    """
+
     if not os.path.exists(image_dir) or not os.path.exists(label_dir):
         print("Error: Image or label directories do not exist")
         return
@@ -95,6 +143,21 @@ def convert_database_to_segments(image_dir, label_dir, dst_dir, overwrite=False)
             iterations = 0
 
 def breakdown(image_path, label, dst_dir, file_base, segment=segments, targ_size = None):
+    """
+    Takes a single image and breaks it down into the target number of segments/ sub-images, saving each
+    image in png format, and each binary label in a similarly named text file.
+
+    Args:
+        image path (string): The file path to the image being processed
+        label (string): The file path to the label annotation
+        file_base (int): The current count of the file naming system
+        segments (int): The number of images that should be produced
+        targ_size (int array): The dimensions of each sub-section produced, overwrites segments
+
+    Returns:
+        filebase (int): The current count of the file naming system.
+    
+    """
     with Image.open(image_path + ".jpg") as image:
         img_size, take_size = image.size[0], None
 
@@ -149,4 +212,6 @@ def breakdown(image_path, label, dst_dir, file_base, segment=segments, targ_size
 
     return file_base
 
-convert_database_to_segments("zebra_annotations/zebra_images", "zebra_annotations/txt_annotations", "zebra_annotations/classification_data")
+# Only to be run if you run this file directly, else import and recall according to your requirements.
+if __name__ == "__main__":
+    convert_database_to_segments("zebra_annotations/zebra_images", "zebra_annotations/txt_annotations", "zebra_annotations/classification_data")

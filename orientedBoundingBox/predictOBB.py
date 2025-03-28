@@ -1,6 +1,5 @@
 from ultralytics import YOLO
 import numpy as np
-from osgeo import gdal, osr
 from PIL import Image
 from tqdm import tqdm
 import os
@@ -31,7 +30,16 @@ def predictionJGW(imageAndDatas, predictionThreshold=0.25, saveLabeledImage=Fals
     Returns:
         imageDetections (dict): A dictionary where the basename of an image is the key, and the key stores a list of boxes in latitude and longitude, and their respective confidence
     """
-    modelPath = f"models/yolo-{modelType}.pt"
+    # Get the absolute path to the models directory
+    models_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "models"))
+    modelPath = os.path.join(models_dir, f"yolo-{modelType}.pt")
+    
+    print(f"\nLoading YOLO model from: {modelPath}")
+    if not os.path.exists(modelPath):
+        print(f"Model file not found at: {modelPath}")
+        print(f"Available model files: {os.listdir(models_dir)}")
+        raise FileNotFoundError(f"YOLO model file not found at: {modelPath}")
+        
     model = YOLO(modelPath)  # load an official model
     # Dictionary to store all detections and their confidence grouped by original image
     imageDetectionsRowCol = {}
@@ -92,27 +100,57 @@ def predictionTIF(imageAndDatas, predictionThreshold=0.25, saveLabeledImage=Fals
     Returns:
         imageDetections (dict): A dictionary where the basename of an image is the key, and the key stores a list of boxes in latitude and longitude, and their respective confidence.
     """
-    modelPath = f"models/yolo-{modelType}.pt"
+    # Get the absolute path to the models directory
+    models_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "models"))
+    modelPath = os.path.join(models_dir, f"yolo-{modelType}.pt")
+    
+    print(f"\nStarting prediction with {len(imageAndDatas)} chunks")
+    print(f"Model path: {modelPath}")
+    print(f"Prediction threshold: {predictionThreshold}")
+    
+    if not os.path.exists(modelPath):
+        print(f"Model file not found at: {modelPath}")
+        print(f"Available model files: {os.listdir(models_dir)}")
+        raise FileNotFoundError(f"YOLO model file not found at: {modelPath}")
+        
     model = YOLO(modelPath)  # load an official model
     # Dictionary to store all detections and their confidence grouped by image, row, and column
     imageDetectionsRowCol = {}
     numOfSavedImages = 1
+    
     # First, process all images and group detections
     with tqdm(total=(len(imageAndDatas)), desc="Creating Oriented Bounding Box") as pbar:
         for baseName, croppedImage, row, col in imageAndDatas:
             try:
                 allPointsList = []
                 allConfidenceList = []
+                
+                # Read the TIF data
                 croppedImageArray = croppedImage.ReadAsArray()
+                print(f"\nProcessing chunk from {baseName} at row {row}, col {col}")
+                print(f"Array shape: {croppedImageArray.shape}")
+                
+                # Convert to RGB if needed
                 if croppedImageArray.ndim == 3:
-                    croppedImageArray = np.moveaxis(croppedImageArray, 0, -1)
+                    if croppedImageArray.shape[0] == 4:  # RGBA
+                        croppedImageArray = croppedImageArray[:3]  # Take only RGB channels
+                    croppedImageArray = np.moveaxis(croppedImageArray, 0, -1)  # Move channels to last dimension
+                elif croppedImageArray.ndim == 2:  # Single band
+                    croppedImageArray = np.stack([croppedImageArray] * 3, axis=-1)
+                
+                # Convert to PIL Image
                 PILImage = Image.fromarray(croppedImageArray)
+                print(f"PIL Image size: {PILImage.size}")
+                
+                # Run YOLO model
                 results = model(PILImage, save=saveLabeledImage, conf=predictionThreshold, iou=0.9, 
                               project=outputFolder+"/labeledImages", name="run", exist_ok=True, verbose=False)
                 
                 if saveLabeledImage and os.path.exists(outputFolder+"/labeledImages/run/image0.jpg"):
                     os.rename(outputFolder+"/labeledImages/run/image0.jpg", outputFolder+f"/labeledImages/run/image{numOfSavedImages}.jpg")
                     numOfSavedImages += 1
+                
+                # Process results
                 for result in results:
                     result = result.cpu()
                     for confidence in result.obb.conf:
@@ -122,16 +160,26 @@ def predictionTIF(imageAndDatas, predictionThreshold=0.25, saveLabeledImage=Fals
                         x2, y2 = boxes[1].tolist()
                         x3, y3 = boxes[2].tolist()
                         x4, y4 = boxes[3].tolist()
-                        longLatList = georeferenceTIF(croppedImage,x1,y1,x2,y2,x3,y3,x4,y4)
+                        longLatList = georeferenceTIF(croppedImage, x1, y1, x2, y2, x3, y3, x4, y4)
                         allPointsList.append(longLatList)
+                
                 if allPointsList:
+                    print(f"Found {len(allPointsList)} detections in this chunk")
                     baseNameWithRowCol = f"{baseName}__r{row}__c{col}"
-                    imageDetectionsRowCol[baseNameWithRowCol] = [allPointsList,allConfidenceList]
+                    imageDetectionsRowCol[baseNameWithRowCol] = [allPointsList, allConfidenceList]
+                else:
+                    print("No detections found in this chunk")
                     
             except Exception as e:
                 print(f"Error processing {baseName}: {e}")
                 print(traceback.format_exc())
             pbar.update(1)
+    
+    print(f"\nTotal chunks processed: {len(imageAndDatas)}")
+    print(f"Chunks with detections: {len(imageDetectionsRowCol)}")
+    
     removeDuplicateBoxesRC(imageDetectionsRowCol=imageDetectionsRowCol, boundBoxChunkSize=boundBoxChunkSize, classificationChunkSize=classificationChunkSize)
     imageDetections = combineChunksToBaseName(imageDetectionsRowCol=imageDetectionsRowCol)
+    
+    print(f"Final number of images with detections: {len(imageDetections)}")
     return imageDetections

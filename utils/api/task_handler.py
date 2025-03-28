@@ -13,6 +13,7 @@ from concurrent.futures import ThreadPoolExecutor, Future
 from utils.compress import compress_folder_to_zip
 from utils.api.logger_handler import LoggerHandler
 import psutil
+import rasterio
 
 class TaskHandler:
     """Handles task processing, queuing, and cleanup."""
@@ -198,7 +199,7 @@ class TaskHandler:
         if not task_id:
             return {
                 'status': 'unknown',
-                'error': 'No task ID provided'
+                'error': 'Invalid task ID'
             }
 
         with self.task_lock:
@@ -206,17 +207,19 @@ class TaskHandler:
             if not task:
                 return {
                     'status': 'unknown',
-                    'error': f'Task {task_id} not found'
+                    'error': 'Task not found'
                 }
-
-            # Add queue position for queued tasks
-            if task.get('status') == 'queued':
-                queue_position = self._get_queue_position(task_id)
-                task = task.copy()  # Create a copy to modify
-                task['queue_position'] = queue_position
-                task['stage'] = f'Waiting in queue (position {queue_position})'
-
-            return task.copy()  # Return a copy to prevent modification
+            
+            # Ensure session_id is set
+            if 'session_id' not in task:
+                # Try to get session_id from input_folder
+                if 'input_folder' in task:
+                    task['session_id'] = os.path.basename(task['input_folder'])
+                else:
+                    # Generate a new session_id if none exists
+                    task['session_id'] = f"{datetime.now().strftime('%Y%m%d_%H%M%S')}_{str(uuid.uuid4())[:8]}"
+            
+            return task.copy()  # Return a copy to prevent external modification
 
     def _get_queue_position(self, task_id):
         """Get the position of a task in the queue (1-based)."""
@@ -282,12 +285,15 @@ class TaskHandler:
                 if 'future' in task:
                     future = task['future']
                     if future and not future.done():
-                        future.cancel()
                         try:
+                            future.cancel()
+                            # Add a timeout to prevent hanging
                             future.result(timeout=1.0)
-                        except:
+                        except Exception:
+                            # Ignore any exceptions from cancellation
                             pass
-                    del task['future']
+                    if 'future' in task:
+                        del task['future']
 
             # Clean up input folder if exists
             input_folder = task.get('input_folder')
@@ -324,221 +330,157 @@ class TaskHandler:
     def check_cancellation(self, task_id):
         """Check if a task has been cancelled."""
         with self.task_lock:
+            # First check if the task is marked as cancelled in active_tasks
             if task_id in self.active_tasks:
                 return self.active_tasks[task_id].get('is_cancelled', False)
+            # Then check if it's in the cancelled_tasks set
             return task_id in self.cancelled_tasks
 
     def process_task(self, task_id, input_folder, params, execute_func):
-        """Process a task directly (synchronously)."""
+        """Process a task with the given parameters."""
+        logger_handler = LoggerHandler()
+        
         try:
-            # Initialize task data
-            if not task_id:
-                task_id = str(uuid.uuid4())
-
+            # Get session_id from input_folder
             session_id = os.path.basename(input_folder)
 
+            # Log task start
+            logger_handler.log_system("\n=== Starting Task Processing ===")
+            logger_handler.log_system(f"Task ID: {task_id}")
+            logger_handler.log_system(f"Session ID: {session_id}")
+            logger_handler.log_system(f"Input folder: {input_folder}")
+            logger_handler.log_system(f"Parameters: {params}")
+            
+            # Update task status with session_id
             with self.task_lock:
-                # Check if task already exists
-                existing_task = self.active_tasks.get(task_id)
-                if existing_task:
-                    task_data = existing_task.copy()
-                    task_data.update({
+                if task_id in self.active_tasks:
+                    self.active_tasks[task_id].update({
                         'status': 'processing',
-                        'progress': 0,
-                        'stage': 'Initializing',
-                        'session_id': session_id  # Ensure session_id is preserved
-                    })
-                else:
-                    task_data = {
-                        'id': task_id,
-                        'status': 'processing',
-                        'progress': 0,
-                        'stage': 'Initializing',
-                        'created_at': datetime.now(),
-                        'input_folder': input_folder,
                         'session_id': session_id,
-                        'is_cancelled': False
-                    }
-
-                # Update task in active_tasks
-                self.active_tasks[task_id] = task_data
-
-                # Create cancellation event if needed
-                if task_id not in self.task_events:
-                    self.task_events[task_id] = threading.Event()
-
-                # Update processing stats
-                with self.stats_lock:
-                    self.stats['current_tasks'] = len([t for t in self.active_tasks.values()
-                                                     if t.get('status') == 'processing'])
-
-            self.logger.log_task_status(task_id, 'processing')
-
-            try:
-                # Process the task
-                output_folder = self._execute_task(task_id, input_folder, params, execute_func)
-
-                if not output_folder or not os.path.exists(output_folder):
-                    raise Exception("No output folder was generated")
+                        'input_folder': input_folder
+                    })
+            
+            # Log input folder contents and validate TIF files
+            logger_handler.log_system("\n=== Input Folder Contents ===")
+            for item in os.listdir(input_folder):
+                item_path = os.path.join(input_folder, item)
+                if os.path.isfile(item_path):
+                    size = os.path.getsize(item_path)
+                    logger_handler.log_system(f"\nFile: {item}")
+                    logger_handler.log_system(f"Full path: {item_path}")
+                    logger_handler.log_system(f"Size: {size} bytes")
                     
-                # Check if there were no detections
-                no_detections_marker = os.path.join(output_folder, "no_detections.txt")
-                if os.path.exists(no_detections_marker):
-                    self.logger.log_system(f"No detections found for task {task_id}")
-                    # Update task status to completed but mark as no detections
-                    with self.task_lock:
-                        current_task = self.active_tasks.get(task_id)
-                        if current_task and not current_task.get('is_cancelled', False):
-                            current_task.update({
-                                'status': 'completed',
-                                'progress': 100,
-                                'stage': 'Completed - No Detections',
-                                'has_detections': False,
-                                'output_folder': output_folder,
-                                'session_id': session_id  # Ensure session_id is preserved
-                            })
-                            self.active_tasks[task_id] = current_task
-                    return task_id
-
-                # Check if task was cancelled during execution
+                    # Validate TIF files
+                    if item.lower().endswith(('.tif', '.tiff')):
+                        try:
+                            # First check if file exists and has content
+                            if not os.path.exists(item_path):
+                                raise ValueError(f"TIF file does not exist: {item_path}")
+                                
+                            if size == 0:
+                                raise ValueError(f"TIF file has 0 bytes: {item_path}")
+                            
+                            # Try to read the file with rasterio
+                            import rasterio
+                            with rasterio.open(item_path) as src:
+                                logger_handler.log_system("\nTIF file validation:")
+                                logger_handler.log_system(f"- Width: {src.width}")
+                                logger_handler.log_system(f"- Height: {src.height}")
+                                logger_handler.log_system(f"- Bands: {src.count}")
+                                logger_handler.log_system(f"- CRS: {src.crs}")
+                                logger_handler.log_system(f"- Transform: {src.transform}")
+                                
+                                # Additional validation
+                                if src.count not in [1, 3, 4]:
+                                    raise ValueError(f"Invalid number of bands in TIF file: {src.count}")
+                                    
+                                if src.width == 0 or src.height == 0:
+                                    raise ValueError("TIF file has zero dimensions")
+                                    
+                        except Exception as e:
+                            logger_handler.log_error(f"Error validating TIF file {item}: {str(e)}")
+                            raise ValueError(f"Invalid TIF file {item}: {str(e)}")
+                else:
+                    logger_handler.log_system(f"\nDirectory: {item}")
+            
+            logger_handler.log_system("\n=== Executing Task ===")
+            
+            # Execute the task with the input folder containing the saved files
+            try:
+                # Convert parameters to their proper types
+                input_type = str(params['input_type'])
+                classification_threshold = float(params['classification_threshold'])
+                prediction_threshold = float(params['prediction_threshold'])
+                save_labeled_image = params['save_labeled_image'].lower() == 'true' if isinstance(params['save_labeled_image'], str) else bool(params['save_labeled_image'])
+                output_type = str(params['output_type'])
+                yolo_model_type = str(params['yolo_model_type'])
+                
+                logger_handler.log_system("\nExecuting main processing function with parameters:")
+                logger_handler.log_system(f"- Input folder: {input_folder}")
+                logger_handler.log_system(f"- Input type: {input_type}")
+                logger_handler.log_system(f"- Classification threshold: {classification_threshold}")
+                logger_handler.log_system(f"- Prediction threshold: {prediction_threshold}")
+                logger_handler.log_system(f"- Save labeled image: {save_labeled_image}")
+                logger_handler.log_system(f"- Output type: {output_type}")
+                logger_handler.log_system(f"- YOLO model type: {yolo_model_type}")
+                
+                # Check if yolo model file exists
+                models_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", "models"))
+                model_path = os.path.join(models_dir, f"yolo-{yolo_model_type}.pt")
+                logger_handler.log_system(f"Model path to check: {model_path}")
+                logger_handler.log_system(f"Model exists: {os.path.exists(model_path)}")
+                if os.path.exists(models_dir):
+                    logger_handler.log_system(f"Available models: {os.listdir(models_dir)}")
+                
+                # Execute the main processing function
+                output_folder = execute_func(
+                    input_folder,
+                    input_type,
+                    classification_threshold,
+                    prediction_threshold,
+                    save_labeled_image,
+                    output_type,
+                    yolo_model_type
+                )
+                
+                logger_handler.log_system(f"\nMain processing completed. Output folder: {output_folder}")
+                
+                # Update task status with output information
                 with self.task_lock:
-                    current_task = self.active_tasks.get(task_id)
-                    if not current_task:
-                        raise Exception("Task state lost during execution")
-                    if current_task.get('is_cancelled', False):
-                        raise Exception("Task was cancelled during execution")
-
-                # Create ZIP file
-                self.logger.log_system(f"Creating ZIP file for task {task_id}")
-                zip_path = self._create_zip_file(task_id, output_folder)
-
-                if not zip_path or not os.path.exists(zip_path):
-                    raise Exception("Failed to create ZIP file")
-
-                # Update task status
-                with self.task_lock:
-                    current_task = self.active_tasks.get(task_id)
-                    if current_task and not current_task.get('is_cancelled', False):
-                        current_task.update({
+                    if task_id in self.active_tasks:
+                        self.active_tasks[task_id].update({
                             'status': 'completed',
                             'progress': 100,
                             'stage': 'Completed',
-                            'zip_path': zip_path,
-                            'has_detections': True,
+                            'output_folder': output_folder,
                             'session_id': session_id  # Ensure session_id is preserved
                         })
-                        self.active_tasks[task_id] = current_task
-
-                # Clean up input folder after successful task completion
-                if input_folder and os.path.exists(input_folder):
-                    try:
-                        shutil.rmtree(input_folder)
-                        self.logger.log_cleanup('input_folder', input_folder)
-                    except Exception as e:
-                        self.logger.log_error(f'Error cleaning up input folder: {str(e)}')
+                
+                # Log task completion
+                logger_handler.log_system("\n=== Task Completed Successfully ===")
+                logger_handler.log_task_status(task_id, 'completed', stage='Task completed successfully')
 
                 return task_id
 
             except Exception as e:
-                error_msg = str(e)
-                self.logger.log_error(f"Task processing failed: {error_msg}")
-
-                # Update task status
-                with self.task_lock:
-                    current_task = self.active_tasks.get(task_id)
-                    if current_task:
-                        if current_task.get('is_cancelled', False):
-                            current_task.update({
-                                'status': 'cancelled',
-                                'error': 'Task cancelled by user',
-                                'stage': 'Cancelled',
-                                'session_id': session_id  # Ensure session_id is preserved
-                            })
-                        else:
-                            current_task.update({
-                                'status': 'failed',
-                                'error': error_msg,
-                                'stage': 'Failed',
-                                'session_id': session_id  # Ensure session_id is preserved
-                            })
-                        self.active_tasks[task_id] = current_task
-
-                # Clean up input folder after task failure
-                if input_folder and os.path.exists(input_folder):
-                    try:
-                        shutil.rmtree(input_folder)
-                        self.logger.log_cleanup('input_folder', input_folder)
-                    except Exception as e:
-                        self.logger.log_error(f'Error cleaning up input folder after failure: {str(e)}')
-                        
-                # Clean up extract directory after task failure
-                try:
-                    # Extract timestamp from session_id (format: YYYYMMDD_HHMMSS_uuid)
-                    if session_id:
-                        timestamp = '_'.join(session_id.split('_')[:2])
-                        extract_base_dir = 'run/extract'
-                        
-                        # Look for extract directories with matching timestamp
-                        if os.path.exists(extract_base_dir):
-                            for dir_name in os.listdir(extract_base_dir):
-                                if dir_name.startswith(timestamp):
-                                    extract_dir = os.path.join(extract_base_dir, dir_name)
-                                    if os.path.exists(extract_dir):
-                                        shutil.rmtree(extract_dir)
-                                        self.logger.log_cleanup('extract_dir', extract_dir)
-                except Exception as e:
-                    self.logger.log_error(f'Error cleaning up extract directory after failure: {str(e)}')
-                
+                logger_handler.log_error(f"Error executing task: {str(e)}")
+                logger_handler.log_error(traceback.format_exc())
                 raise
 
         except Exception as e:
-            with self.stats_lock:
-                self.stats['current_tasks'] = len([t for t in self.active_tasks.values()
-                                                 if t.get('status') == 'processing'])
-                self.stats['failed_tasks'] += 1
-
-            self.logger.log_error(f"Error in process_task: {str(e)}")
-
-            # Ensure task exists and is marked as failed
+            # Update task status with error information
             with self.task_lock:
-                if task_id:
-                    self.active_tasks[task_id] = {
-                        'id': task_id,
+                if task_id in self.active_tasks:
+                    self.active_tasks[task_id].update({
                         'status': 'failed',
                         'error': str(e),
                         'stage': 'Failed',
-                        'created_at': datetime.now(),
-                        'session_id': session_id,  # Ensure session_id is preserved
-                        'is_cancelled': False
-                    }
+                        'session_id': session_id  # Ensure session_id is preserved
+                    })
             
-            # Clean up input folder in case of unexpected error
-            if input_folder and os.path.exists(input_folder):
-                try:
-                    shutil.rmtree(input_folder)
-                    self.logger.log_cleanup('input_folder', input_folder)
-                except Exception as cleanup_error:
-                    self.logger.log_error(f'Error cleaning up input folder in outer exception: {str(cleanup_error)}')
-            
-            # Clean up extract directory in case of unexpected error
-            try:
-                # Extract timestamp from session_id (format: YYYYMMDD_HHMMSS_uuid)
-                if session_id:
-                    timestamp = '_'.join(session_id.split('_')[:2])
-                    extract_base_dir = 'run/extract'
-                    
-                    # Look for extract directories with matching timestamp
-                    if os.path.exists(extract_base_dir):
-                        for dir_name in os.listdir(extract_base_dir):
-                            if dir_name.startswith(timestamp):
-                                extract_dir = os.path.join(extract_base_dir, dir_name)
-                                if os.path.exists(extract_dir):
-                                    shutil.rmtree(extract_dir)
-                                    self.logger.log_cleanup('extract_dir', extract_dir)
-            except Exception as cleanup_error:
-                self.logger.log_error(f'Error cleaning up extract directory in outer exception: {str(cleanup_error)}')
-                    
-            return task_id
+            logger_handler.log_error(f"\n=== Task Failed ===")
+            logger_handler.log_error(f"Error processing task {task_id}: {str(e)}", details=traceback.format_exc())
+            raise
 
     def _execute_task(self, task_id, input_folder, params, execute_func):
         """Execute the task with proper progress tracking and cancellation checks."""
@@ -585,7 +527,14 @@ class TaskHandler:
                         remaining = seconds
                         
                         while remaining > 0:
-                            check_cancel()
+                            # Check for cancellation during sleep
+                            try:
+                                check_cancel()
+                            except Exception as e:
+                                # Restore original sleep before re-raising
+                                time.sleep = original_sleep
+                                raise e
+                                
                             sleep_time = min(chunk_size, remaining)
                             original_sleep(sleep_time)
                             remaining -= sleep_time
@@ -597,8 +546,23 @@ class TaskHandler:
                     import sys
                     sys._task_cancelled_callback = check_cancel
                     
+                    # Check for cancellation before starting execution
+                    check_cancel()
+                    
                     # Execute the function, tracking any extract directory it creates
+                    self.logger.log_system(f"\nExecuting main processing function with parameters:")
+                    self.logger.log_system(f"- Upload directory: {uploadDir}")
+                    self.logger.log_system(f"- Input type: {inputType}")
+                    self.logger.log_system(f"- Classification threshold: {classificationThreshold}")
+                    self.logger.log_system(f"- Prediction threshold: {predictionThreshold}")
+                    self.logger.log_system(f"- Save labeled image: {saveLabeledImage}")
+                    self.logger.log_system(f"- Output type: {outputType}")
+                    self.logger.log_system(f"- YOLO model type: {yoloModelType}")
+                    
                     result = execute_func(uploadDir, inputType, classificationThreshold, predictionThreshold, saveLabeledImage, outputType, yoloModelType)
+                    
+                    # Final cancellation check after execution
+                    check_cancel()
                     
                     # Look for extract directory that might have been created
                     if not extract_dir:
@@ -621,8 +585,13 @@ class TaskHandler:
                     if hasattr(sys, '_task_cancelled_callback'):
                         delattr(sys, '_task_cancelled_callback')
                     
-                    # Final cancellation check before returning
-                    check_cancel()
+                    # In case of any other exception, do a final cancellation check
+                    try:
+                        if self.check_cancellation(task_id):
+                            raise Exception("Task cancelled by user during execution")
+                    except Exception as e:
+                        if "Task cancelled by user" in str(e):
+                            raise e
                     
                     return result
             

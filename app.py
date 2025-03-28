@@ -197,6 +197,31 @@ def predict_api():
     try:
         logger_handler.log_request('POST', '/predict')
         
+        # DEBUG - Log full request details
+        print("\n========== DETAILED REQUEST INSPECTION (/predict) ==========")
+        print(f"Request method: {request.method}")
+        print(f"Content-Type: {request.content_type}")
+        print(f"Content-Length: {request.headers.get('Content-Length')}")
+        print(f"Form keys: {list(request.form.keys())}")
+        print(f"Files keys: {list(request.files.keys())}")
+        
+        # Inspect each file key
+        for key in request.files:
+            files_list = request.files.getlist(key)
+            print(f"\nFile key '{key}' has {len(files_list)} file(s):")
+            for idx, file in enumerate(files_list):
+                if file and file.filename:
+                    print(f"  [{idx}] Filename: {file.filename}")
+                    print(f"      Content-Type: {file.content_type}")
+                    file_size = 0
+                    file.stream.seek(0, os.SEEK_END)
+                    file_size = file.stream.tell()
+                    file.stream.seek(0)  # Reset file pointer
+                    print(f"      Size: {file_size} bytes")
+                else:
+                    print(f"  [{idx}] Empty file")
+        print("===========================================================\n")
+        
         # Parse request
         files, params = request_handler.parse_request_parameters(request)
         logger_handler.log_request('POST', '/predict', params=params)
@@ -269,6 +294,31 @@ def predict_web():
     """Web endpoint with queuing and progress tracking"""
     try:
         logger_handler.log_request('POST', '/web/predict')
+        
+        # DEBUG - Log full request details
+        print("\n========== DETAILED REQUEST INSPECTION (/web/predict) ==========")
+        print(f"Request method: {request.method}")
+        print(f"Content-Type: {request.content_type}")
+        print(f"Content-Length: {request.headers.get('Content-Length')}")
+        print(f"Form keys: {list(request.form.keys())}")
+        print(f"Files keys: {list(request.files.keys())}")
+        
+        # Inspect each file key
+        for key in request.files:
+            files_list = request.files.getlist(key)
+            print(f"\nFile key '{key}' has {len(files_list)} file(s):")
+            for idx, file in enumerate(files_list):
+                if file and file.filename:
+                    print(f"  [{idx}] Filename: {file.filename}")
+                    print(f"      Content-Type: {file.content_type}")
+                    file_size = 0
+                    file.stream.seek(0, os.SEEK_END)
+                    file_size = file.stream.tell()
+                    file.stream.seek(0)  # Reset file pointer
+                    print(f"      Size: {file_size} bytes")
+                else:
+                    print(f"  [{idx}] Empty file")
+        print("===========================================================\n")
         
         # Parse request
         files, params = request_handler.parse_request_parameters(request)
@@ -586,6 +636,13 @@ def download_result(token):
             logger_handler.log_error(f'Task not found for download: {task_id}')
             return request_handler.create_error_response('Task not found', 404)
         
+        # Get application root directory for absolute paths
+        app_root = os.path.dirname(os.path.abspath(__file__))
+        
+        # Debug logging for path investigation
+        logger_handler.log_system(f'App root directory: {app_root}')
+        logger_handler.log_system(f'Task info: {task}')
+        
         # First check if the task has a stored detection status
         if 'has_detections' in task:
             has_detections = task.get('has_detections', False)
@@ -597,6 +654,12 @@ def download_result(token):
                 output_folder = task.get('output_folder')
                 if not output_folder and task.get('zip_path'):
                     output_folder = os.path.dirname(task.get('zip_path'))
+                
+                # Make sure output_folder is an absolute path
+                if output_folder and not os.path.isabs(output_folder):
+                    output_folder = os.path.join(app_root, output_folder)
+                
+                logger_handler.log_system(f'No detections output folder path: {output_folder}')
                 
                 if not output_folder or not os.path.exists(output_folder):
                     logger_handler.log_error(f'Output folder not found for no-detection task: {task_id}')
@@ -633,6 +696,13 @@ def download_result(token):
             # For tasks with detections, continue with ZIP file download 
             if has_detections and task.get('zip_path'):
                 zip_path = task.get('zip_path')
+                
+                # Make sure zip_path is an absolute path
+                if not os.path.isabs(zip_path):
+                    zip_path = os.path.join(app_root, zip_path)
+                
+                logger_handler.log_system(f'ZIP file path: {zip_path}')
+                
                 if not os.path.exists(zip_path):
                     logger_handler.log_error(f'ZIP file not found at path: {zip_path}')
                     return request_handler.create_error_response(f'ZIP file not found at path: {zip_path}', 404)
@@ -671,6 +741,12 @@ def download_result(token):
             logger_handler.log_error(f'ZIP path not found for task: {task_id}')
             return request_handler.create_error_response('ZIP path not found in task data', 404)
         
+        # Make sure zip_path is an absolute path
+        if not os.path.isabs(zip_path):
+            zip_path = os.path.join(app_root, zip_path)
+            
+        logger_handler.log_system(f'ZIP path for task {task_id}: {zip_path}')
+        
         if not os.path.exists(zip_path):
             logger_handler.log_error(f'ZIP file not found at path: {zip_path}')
             return request_handler.create_error_response(f'ZIP file not found at path: {zip_path}', 404)
@@ -685,8 +761,11 @@ def download_result(token):
         # Try finding the actual output folder which contains the detection files
         logger_handler.log_system(f'Checking for detections for download in session: {session_id}')
         
-        # First check for a folder in run/output with the session_id name
-        session_output = os.path.join('run/output', session_id)
+        # First check for a folder in run/output with the session_id name (using absolute path)
+        base_output_folder = os.path.join(app_root, 'run', 'output')
+        session_output = os.path.join(base_output_folder, session_id)
+        
+        logger_handler.log_system(f'Looking for session output at: {session_output}')
         
         if os.path.exists(session_output) and os.path.isdir(session_output):
             output_folder = session_output
@@ -770,7 +849,9 @@ def download_result(token):
         if not has_detections:
             logger_handler.log_system(f'No detections found for task {task_id}, sending marker file')
             # If no_detections marker exists, send it
+            timestamp = datetime.now().strftime("%Y%m%d")
             if os.path.exists(no_detections_marker):
+                logger_handler.log_system(f'Using existing no_detections marker: {no_detections_marker}')
                 response = send_file(
                     no_detections_marker, 
                     mimetype='text/plain',
@@ -780,16 +861,41 @@ def download_result(token):
             else:
                 # Create a temporary no_detections marker
                 temp_marker = os.path.join(output_folder, "no_detections.txt")
-                with open(temp_marker, 'w') as f:
-                    f.write("No detections found")
-                response = send_file(
-                    temp_marker, 
-                    mimetype='text/plain',
-                    as_attachment=True,
-                    download_name=f'result_{timestamp}.txt'
-                )
+                logger_handler.log_system(f'Creating temporary no_detections marker: {temp_marker}')
+                try:
+                    with open(temp_marker, 'w') as f:
+                        f.write("No detections found")
+                    response = send_file(
+                        temp_marker, 
+                        mimetype='text/plain',
+                        as_attachment=True,
+                        download_name=f'result_{timestamp}.txt'
+                    )
+                except Exception as e:
+                    logger_handler.log_error(f'Error creating no_detections file: {str(e)}')
+                    return request_handler.create_error_response(f'Error creating no_detections file: {str(e)}', 500)
             response.headers['X-Has-Detections'] = 'false'
             return response
+        
+        # Double check zip file exists with better error logging
+        if not os.path.exists(zip_path):
+            logger_handler.log_error(f'ZIP file not found at path for download: {zip_path}')
+            
+            # Try to find the zip file in the output directory by pattern matching
+            # This is a fallback in case the path was incorrectly stored
+            matching_zips = []
+            if os.path.exists(output_folder):
+                for file in os.listdir(output_folder):
+                    if file.endswith('.zip'):
+                        matching_zips.append(os.path.join(output_folder, file))
+            
+            if matching_zips:
+                # Use the most recent zip file
+                matching_zips.sort(key=os.path.getmtime, reverse=True)
+                zip_path = matching_zips[0]
+                logger_handler.log_system(f'Found alternative ZIP file: {zip_path}')
+            else:
+                return request_handler.create_error_response(f'ZIP file not found at path: {zip_path}', 404)
         
         file_size = os.path.getsize(zip_path)
         if file_size == 0:
@@ -880,6 +986,38 @@ def get_server_status():
 def index():
     # your code here
     return 'Hello World'
+
+@app.route('/debug_files', methods=['POST'])
+def debug_files():
+    """Debug endpoint that just shows received files"""
+    print("\n==== DEBUG FILES ENDPOINT ====")
+    print(f"Request method: {request.method}")
+    print(f"Content-Type: {request.content_type}")
+    
+    # Print all request files
+    received_files = []
+    print("Files in request.files.keys():", list(request.files.keys()))
+    
+    for key in request.files:
+        files_list = request.files.getlist(key)
+        print(f"Key '{key}' has {len(files_list)} file(s)")
+        
+        for idx, file in enumerate(files_list):
+            if file and file.filename:
+                file_info = {
+                    "key": key,
+                    "index": idx,
+                    "filename": file.filename,
+                    "content_type": file.content_type
+                }
+                received_files.append(file_info)
+                print(f"  File {idx}: {file.filename} ({file.content_type})")
+    
+    # Return a simple JSON response with the files received
+    return {
+        "message": f"Received {len(received_files)} files",
+        "files": received_files
+    }, 200
 
 if __name__ == '__main__':
     logger_handler.log_system('Starting Flask server on port 8000')

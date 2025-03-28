@@ -7,14 +7,18 @@ from werkzeug.utils import secure_filename
 from flask import send_file, Response, send_from_directory
 import zipfile
 import traceback
+from utils.api.logger_handler import LoggerHandler
+from utils.api.request_handler import RequestHandler
 
 class FileHandler:
     """Handles file operations including uploads and downloads."""
     
     def __init__(self):
         """Initialize file handler with configuration."""
-        self.BASE_UPLOAD_FOLDER = 'input'
-        self.BASE_OUTPUT_FOLDER = 'run/output'
+        # Use absolute paths
+        self.APP_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+        self.BASE_UPLOAD_FOLDER = os.path.join(self.APP_ROOT, 'input')
+        self.BASE_OUTPUT_FOLDER = os.path.join(self.APP_ROOT, 'run', 'output')
         self.ALLOWED_EXTENSIONS = {
             '0': {'zip', 'jpg', 'jpeg', 'png', 'jgw'},  # Type 0: jpg/png/jpeg + jgw or zip including these
             '1': {'zip', 'tif', 'tiff'}  # Type 1: GeoTIFF files or zip including them
@@ -24,6 +28,7 @@ class FileHandler:
         for folder in [self.BASE_UPLOAD_FOLDER, self.BASE_OUTPUT_FOLDER]:
             if not os.path.exists(folder):
                 os.makedirs(folder)
+                print(f"Created directory: {folder}")
     
     def allowed_file(self, filename, input_type='0'):
         """Check if the file extension is allowed.
@@ -35,12 +40,24 @@ class FileHandler:
         Returns:
             bool: True if the file extension is allowed, False otherwise
         """
+        logger_handler = LoggerHandler()
+        
         if '.' not in filename:
+            logger_handler.log_system(f"File {filename} has no extension, rejected")
             return False
             
         ext = filename.rsplit('.', 1)[1].lower()
         allowed = self.ALLOWED_EXTENSIONS.get(input_type, self.ALLOWED_EXTENSIONS['0'])
-        return ext in allowed
+        
+        is_allowed = ext in allowed
+        
+        if is_allowed:
+            logger_handler.log_system(f"File {filename} with extension {ext} is allowed for input_type {input_type}")
+        else:
+            logger_handler.log_system(f"File {filename} with extension {ext} is NOT allowed for input_type {input_type}")
+            logger_handler.log_system(f"Allowed extensions for input_type {input_type}: {allowed}")
+            
+        return is_allowed
     
     def create_session_folders(self):
         """Create unique session folders for input and output.
@@ -63,18 +80,21 @@ class FileHandler:
             flask.Response: A response object with the file attached.
         """
         try:
-            logger_handler.log_debug(f"Sending file: {filepath}")
+            # Use the imported logger_handler
+            logger_handler = LoggerHandler()
+            
+            logger_handler.log_system(f"Sending file: {filepath}")
             
             # Check if file exists
             if not os.path.exists(filepath):
                 logger_handler.log_error(f"File does not exist: {filepath}")
-                return request_handler.create_error_response(f"File not found: {filepath}", 404)
+                return {'error': f'File not found: {filepath}'}, 404
             
             # Get file size
             file_size = os.path.getsize(filepath)
             if file_size == 0:
                 logger_handler.log_error(f"File is empty: {filepath}")
-                return request_handler.create_error_response(f"File is empty: {filepath}", 500)
+                return {'error': f'File is empty: {filepath}'}, 500
             
             # Get file extension to determine mime type
             _, ext = os.path.splitext(filepath)
@@ -101,4 +121,4 @@ class FileHandler:
             )
         except Exception as e:
             logger_handler.log_error(f"Error sending file: {str(e)}", details=traceback.format_exc())
-            return request_handler.create_error_response(f"Error sending file: {str(e)}", 500) 
+            return {'error': f'Error sending file: {str(e)}'}, 500 

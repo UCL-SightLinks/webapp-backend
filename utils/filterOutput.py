@@ -1,11 +1,6 @@
 import math
-from itertools import combinations
 import re
 from shapely.geometry import Polygon
-import yaml
-from pathlib import Path
-from torchvision.ops import nms
-from torch import is_tensor, tensor
 from tqdm import tqdm
 
 def combineChunksToBaseName(imageDetectionsRowCol):

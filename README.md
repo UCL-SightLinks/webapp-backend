@@ -1,6 +1,6 @@
-# SightLink
+# SightLinks
 
-SightLink is a computer vision system designed to detect and georeference crosswalks in aerial imagery. It processes .jpg (or .jpeg, .png) with their corresponding .jgw file and .tif files, providing oriented bounding boxes with latitude and longitude coordinates. The system uses a combination of image segmentation, mobileNet detection, YOLO-based detection, georeferencing, and filtering to accurately identify and locate crosswalks in aerial photographs.
+SightLinks is a computer vision system designed to detect and georeference crosswalks in aerial imagery. It processes .jpg (or .jpeg, .png) with their corresponding .jgw file and .tif files, providing oriented bounding boxes with latitude and longitude coordinates. The system uses a combination of image segmentation, mobileNet detection, YOLO-based detection, georeferencing, and filtering to accurately identify and locate crosswalks in aerial photographs.
 
 ## Table of Contents
 
@@ -40,8 +40,8 @@ SightLink is a computer vision system designed to detect and georeference crossw
 1. Clone the repository:
 
 ```bash
-git clone https://github.com/UCL-SightLink/SightLink-Main.git
-cd SightLink-Main
+git clone https://github.com/UCL-SightLinks/SightLinks-Main.git
+cd SightLinks-Main
 ```
 
 2. Create and activate a virtual environment:
@@ -59,7 +59,16 @@ venv\Scripts\activate
 
 3. Install dependencies:
 
+For Windows and Linux Machines:
 ```bash
+sudo apt update
+sudo apt install gdal-bin libgdal-dev
+pip install -r requirements.txt
+```
+For MacOS machines:
+```bash
+brew update
+brew install gdal
 pip install -r requirements.txt
 ```
 
@@ -131,7 +140,7 @@ run/output/YYYYMMDD_HHMMSS/  # Timestamp-based directory
 ## Project Structure
 
 ```
-SightLink-Main/
+SightLinks-Main/
 ├── classificationScreening/    # Building classification module
 │   ├── classify.py            # Main classification logic
 │   └── utils/                 # Classification utilities
