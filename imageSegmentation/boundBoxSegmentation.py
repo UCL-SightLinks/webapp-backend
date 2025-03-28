@@ -4,6 +4,7 @@ from tqdm import tqdm
 import os
 import sys
 import traceback
+import shutil
 
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 from imageSegmentation.classificationSegmentation import classificationSegmentation
@@ -107,96 +108,137 @@ def boundBoxSegmentationTIF(classificationThreshold=0.35, extractDir = "run/extr
                     print(f"\nProcessing TIF file: {inputFileName}")
                     print(f"Full path: {imagePath}")
                     
-                    # Open the TIF file
-                    dataset = gdal.Open(imagePath, gdal.GA_ReadOnly)
-                    if dataset is None:
-                        raise Exception(f"Failed to open {imagePath}")
-                    
-                    width = dataset.RasterXSize
-                    height = dataset.RasterYSize
-                    num_bands = dataset.RasterCount
-                    
-                    # Log TIF file details
-                    print(f"TIF file details:")
-                    print(f"- Dimensions: {width}x{height}")
-                    print(f"- Number of bands: {num_bands}")
-                    print(f"- Projection: {dataset.GetProjection()}")
-                    print(f"- Geotransform: {dataset.GetGeoTransform()}")
-                    
-                    # Get the georeference data
-                    geoTransform = dataset.GetGeoTransform()
-                    
-                    # Run classification segmentation
-                    print("\nRunning classification segmentation...")
-                    chunksOfInterest = classificationSegmentation(
-                        inputFileName=imagePath,
-                        classificationThreshold=classificationThreshold,
-                        classificationChunkSize=classificationChunkSize,
-                        boundBoxChunkSize=boundBoxChunkSize
-                    )
-                    
-                    print(f"Found {len(chunksOfInterest)} chunks of interest")
-                    
-                    if not chunksOfInterest:
-                        print("No chunks of interest found in the image")
-                        continue
-                    
-                    # Process each chunk of interest
-                    for row, col in chunksOfInterest:
-                        try:
-                            offset = (boundBoxChunkSize - classificationChunkSize) / 2
-                            topX = col * classificationChunkSize - offset if col * classificationChunkSize - offset > 0 else 0
-                            topY = row * classificationChunkSize - offset if row * classificationChunkSize - offset > 0 else 0
-                            
-                            if topX + boundBoxChunkSize > width:
-                                topX = width - boundBoxChunkSize
-                            if topY + boundBoxChunkSize > height:
-                                topY = height - boundBoxChunkSize
-                                
-                            # Convert the pixel coordinates to georeferenced coordinates
-                            georeferencedTopX = geoTransform[0] + topX * geoTransform[1] + topY * geoTransform[2]
-                            georeferencedTopY = geoTransform[3] + topX * geoTransform[4] + topY * geoTransform[5]
-                            
-                            # Create unique identifier for this chunk
-                            imageChunk = f"{inputFileName}{(topX, topY, boundBoxChunkSize)}"
-                            if imageChunk in chunkSeen:
-                                continue
-                            chunkSeen.add(imageChunk)
-                            
-                            print(f"\nProcessing chunk at row {row}, col {col}")
-                            print(f"Pixel coordinates: ({topX}, {topY})")
-                            print(f"Georeferenced coordinates: ({georeferencedTopX}, {georeferencedTopY})")
-                            
-                            # Create a memory dataset for the cropped image
-                            cropped = gdal.GetDriverByName('MEM').Create('', boundBoxChunkSize, boundBoxChunkSize, num_bands)
-                            
-                            # Copy geotransform and projection
-                            cropped.SetGeoTransform([
-                                georeferencedTopX,
-                                geoTransform[1],
-                                geoTransform[2],
-                                georeferencedTopY,
-                                geoTransform[4],
-                                geoTransform[5]
-                            ])
-                            cropped.SetProjection(dataset.GetProjection())
-                            
-                            # Copy data from source to cropped image
-                            for b in range(num_bands):
-                                src_band = dataset.GetRasterBand(b + 1)
-                                dst_band = cropped.GetRasterBand(b + 1)
-                                src_band.ReadRaster(topX, topY, boundBoxChunkSize, boundBoxChunkSize,
-                                                  buf_type=src_band.DataType,
-                                                  buf_obj=dst_band)
-                            
-                            baseName, _ = os.path.splitext(inputFileName)
-                            imageAndDatas.append((baseName, cropped, row, col))
-                            print(f"Successfully added chunk to results")
-                            
-                        except Exception as chunk_error:
-                            print(f"Error processing chunk at row {row}, col {col}: {str(chunk_error)}")
-                            print(traceback.format_exc())
+                    # Try to open with PIL first
+                    try:
+                        print("Attempting to open TIF with PIL...")
+                        pilImage = Image.open(imagePath)
+                        width, height = pilImage.size
+                        print(f"PIL opened TIF file with dimensions: {width}x{height}")
+                        
+                        # Open with GDAL just to get georeferencing data
+                        dataset = gdal.Open(imagePath, gdal.GA_ReadOnly)
+                        if dataset is None:
+                            raise Exception(f"Failed to open {imagePath} with GDAL")
+                        
+                        # Get georeferencing data
+                        geoTransform = dataset.GetGeoTransform()
+                        projection = dataset.GetProjection()
+                        
+                        # Log TIF file details
+                        print(f"TIF file details:")
+                        print(f"- Dimensions: {width}x{height}")
+                        print(f"- PIL mode: {pilImage.mode}")
+                        print(f"- Projection: {projection}")
+                        print(f"- Geotransform: {geoTransform}")
+                        
+                        # Create a temporary JPEG file for each segment later
+                        temp_dir = os.path.join(os.path.dirname(imagePath), "temp_segments")
+                        os.makedirs(temp_dir, exist_ok=True)
+                        
+                        # Run classification segmentation
+                        print("\nRunning classification segmentation...")
+                        chunksOfInterest = classificationSegmentation(
+                            inputFileName=imagePath,
+                            classificationThreshold=classificationThreshold,
+                            classificationChunkSize=classificationChunkSize,
+                            boundBoxChunkSize=boundBoxChunkSize
+                        )
+                        
+                        print(f"Found {len(chunksOfInterest)} chunks of interest")
+                        
+                        if not chunksOfInterest:
+                            print("No chunks of interest found in the image")
+                            # Clean up temporary directory
+                            try:
+                                shutil.rmtree(temp_dir)
+                                print(f"Removed temporary directory: {temp_dir}")
+                            except:
+                                print(f"Failed to remove temporary directory: {temp_dir}")
                             continue
+                        
+                        # Process each chunk of interest
+                        for row, col in chunksOfInterest:
+                            try:
+                                offset = (boundBoxChunkSize - classificationChunkSize) / 2
+                                topX = col * classificationChunkSize - offset if col * classificationChunkSize - offset > 0 else 0
+                                topY = row * classificationChunkSize - offset if row * classificationChunkSize - offset > 0 else 0
+                                
+                                topX = int(topX)
+                                topY = int(topY)
+                                
+                                if topX + boundBoxChunkSize > width:
+                                    topX = width - boundBoxChunkSize
+                                if topY + boundBoxChunkSize > height:
+                                    topY = height - boundBoxChunkSize
+                                    
+                                # Convert the pixel coordinates to georeferenced coordinates
+                                georeferencedTopX = geoTransform[0] + topX * geoTransform[1] + topY * geoTransform[2]
+                                georeferencedTopY = geoTransform[3] + topX * geoTransform[4] + topY * geoTransform[5]
+                                
+                                # Create unique identifier for this chunk
+                                imageChunk = f"{inputFileName}{(topX, topY, boundBoxChunkSize)}"
+                                if imageChunk in chunkSeen:
+                                    continue
+                                chunkSeen.add(imageChunk)
+                                
+                                print(f"\nProcessing chunk at row {row}, col {col}")
+                                print(f"Pixel coordinates: ({topX}, {topY})")
+                                print(f"Georeferenced coordinates: ({georeferencedTopX}, {georeferencedTopY})")
+                                
+                                # Crop the image with PIL
+                                box = (topX, topY, topX + boundBoxChunkSize, topY + boundBoxChunkSize)
+                                print(f"Cropping box: {box}")
+                                cropped_pil = pilImage.crop(box)
+                                
+                                # Save to temporary file
+                                temp_jpg = os.path.join(temp_dir, f"segment_{row}_{col}.jpg")
+                                cropped_pil.save(temp_jpg)
+                                print(f"Saved temporary segment to {temp_jpg}")
+                                
+                                # Create a GDAL dataset with the right georeferencing
+                                driver = gdal.GetDriverByName('MEM')
+                                num_bands = len(cropped_pil.getbands()) 
+                                print(f"Creating GDAL dataset with {num_bands} bands")
+                                
+                                # We're going to create a simpler version of the dataset
+                                # that preserves the geolocation but uses the PIL image data
+                                gdal_dataset = driver.Create('', boundBoxChunkSize, boundBoxChunkSize, num_bands)
+                                
+                                # Set the georeferencing information
+                                cropped_geo_transform = [
+                                    georeferencedTopX,
+                                    geoTransform[1],
+                                    geoTransform[2],
+                                    georeferencedTopY,
+                                    geoTransform[4],
+                                    geoTransform[5]
+                                ]
+                                gdal_dataset.SetGeoTransform(cropped_geo_transform)
+                                gdal_dataset.SetProjection(projection)
+                                
+                                print(f"Georeferencing set for cropped dataset")
+                                
+                                baseName, _ = os.path.splitext(inputFileName)
+                                imageAndDatas.append((baseName, gdal_dataset, row, col))
+                                print(f"Successfully added chunk to results")
+                                
+                            except Exception as chunk_error:
+                                print(f"Error processing chunk at row {row}, col {col}: {str(chunk_error)}")
+                                print(traceback.format_exc())
+                                continue
+                        
+                        # Clean up temporary directory
+                        try:
+                            shutil.rmtree(temp_dir)
+                            print(f"Removed temporary directory: {temp_dir}")
+                        except:
+                            print(f"Failed to remove temporary directory: {temp_dir}")
+                                
+                    except Exception as pil_error:
+                        print(f"Error processing with PIL: {str(pil_error)}")
+                        print(traceback.format_exc())
+                        print("Cannot proceed with TIF processing due to PIL error")
+                        continue
                     
                 except Exception as e:
                     print(f"Error processing TIF file {inputFileName}: {str(e)}")

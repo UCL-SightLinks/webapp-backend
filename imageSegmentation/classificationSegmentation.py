@@ -31,42 +31,68 @@ def classificationSegmentation(inputFileName, classificationThreshold, classific
     # Check if the file is a TIF
     if inputFileName.lower().endswith(('.tif', '.tiff')):
         print("\nProcessing TIF file...")
-        # Open with GDAL for TIF files
-        dataset = gdal.Open(inputFileName, gdal.GA_ReadOnly)
-        if dataset is None:
-            raise Exception(f"Failed to open TIF file: {inputFileName}")
+        try:
+            # Try to open with PIL directly first
+            print("Attempting to open TIF with PIL...")
+            image = Image.open(inputFileName)
+            width, height = image.size
+            print(f"Successfully opened TIF with PIL")
+            print(f"TIF dimensions: {width}x{height}")
+            print(f"TIF mode: {image.mode}")
             
-        width = dataset.RasterXSize
-        height = dataset.RasterYSize
-        num_bands = dataset.RasterCount
-        
-        print(f"TIF file details:")
-        print(f"- Dimensions: {width}x{height}")
-        print(f"- Number of bands: {num_bands}")
-        print(f"- Projection: {dataset.GetProjection()}")
-        print(f"- Geotransform: {dataset.GetGeoTransform()}")
-        
-        # Read all bands into a numpy array
-        print("\nReading TIF data...")
-        image_data = np.zeros((height, width, num_bands), dtype=np.uint8)
-        for b in range(num_bands):
-            band = dataset.GetRasterBand(b + 1)
-            image_data[:, :, b] = band.ReadAsArray()
-            print(f"Read band {b+1}, min: {np.min(image_data[:,:,b])}, max: {np.max(image_data[:,:,b])}")
+            # Convert to RGB if needed
+            if image.mode != 'RGB':
+                print(f"Converting from {image.mode} to RGB")
+                image = image.convert('RGB')
+                
+        except Exception as e:
+            print(f"Error opening TIF with PIL: {str(e)}")
+            print("Falling back to GDAL...")
             
-        # Convert to PIL Image for processing
-        print("\nConverting to PIL Image...")
-        if num_bands == 1:
-            image = Image.fromarray(image_data[:, :, 0])
-        elif num_bands == 3:
-            image = Image.fromarray(image_data)
-        elif num_bands == 4:
-            # Convert RGBA to RGB
-            image = Image.fromarray(image_data[:, :, :3])
-        else:
-            raise ValueError(f"Unsupported number of bands: {num_bands}")
+            # Open with GDAL for TIF files if PIL fails
+            dataset = gdal.Open(inputFileName, gdal.GA_ReadOnly)
+            if dataset is None:
+                raise Exception(f"Failed to open TIF file: {inputFileName}")
+                
+            width = dataset.RasterXSize
+            height = dataset.RasterYSize
+            num_bands = dataset.RasterCount
             
-        dataset = None  # Close the dataset
+            print(f"TIF file details:")
+            print(f"- Dimensions: {width}x{height}")
+            print(f"- Number of bands: {num_bands}")
+            print(f"- Projection: {dataset.GetProjection()}")
+            print(f"- Geotransform: {dataset.GetGeoTransform()}")
+            
+            # Alternative approach without using ReadAsArray
+            print("\nReading TIF data using alternative method...")
+            
+            # Create a temporary file to convert with GDAL
+            temp_jpg = f"{os.path.splitext(inputFileName)[0]}_temp.jpg"
+            try:
+                # Use gdal.Translate to convert the TIF to a format PIL can read
+                print(f"Converting TIF to temporary JPG: {temp_jpg}")
+                gdal.Translate(temp_jpg, dataset, format="JPEG")
+                
+                # Open the temporary file with PIL
+                print(f"Opening converted JPG with PIL")
+                image = Image.open(temp_jpg)
+                width, height = image.size
+                print(f"Temporary JPG dimensions: {width}x{height}")
+                
+                # Cleanup
+                dataset = None
+            except Exception as inner_e:
+                print(f"Error in GDAL alternative method: {str(inner_e)}")
+                raise Exception(f"Could not process TIF file: {str(inner_e)}")
+            finally:
+                # Clean up temporary file
+                if os.path.exists(temp_jpg):
+                    try:
+                        os.remove(temp_jpg)
+                        print(f"Removed temporary JPG file")
+                    except:
+                        print(f"Could not remove temporary file: {temp_jpg}")
     else:
         print("\nProcessing non-TIF file...")
         # Use PIL for non-TIF files

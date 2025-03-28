@@ -5,7 +5,7 @@ uploadDir = "input"
 
 # inputType is used to determine if we are using digimap data or not
 # 0 for .jpg, .jpeg, .png and their corresponding .jgw file, 1 is for .tif files
-inputType = "0"
+inputType = "1"
 
 # classification threshold is used by boundBoxSegmentation to modify the threshold for the classification
 classificationThreshold = 0.35
