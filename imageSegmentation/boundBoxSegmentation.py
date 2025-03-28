@@ -165,7 +165,7 @@ def boundBoxSegmentationTIF(classificationThreshold=0.35, extractDir = "run/extr
                                 
                                 topX = int(topX)
                                 topY = int(topY)
-                                
+                        
                                 if topX + boundBoxChunkSize > width:
                                     topX = width - boundBoxChunkSize
                                 if topY + boundBoxChunkSize > height:
@@ -174,7 +174,7 @@ def boundBoxSegmentationTIF(classificationThreshold=0.35, extractDir = "run/extr
                                 # Convert the pixel coordinates to georeferenced coordinates
                                 georeferencedTopX = geoTransform[0] + topX * geoTransform[1] + topY * geoTransform[2]
                                 georeferencedTopY = geoTransform[3] + topX * geoTransform[4] + topY * geoTransform[5]
-                                
+                        
                                 # Create unique identifier for this chunk
                                 imageChunk = f"{inputFileName}{(topX, topY, boundBoxChunkSize)}"
                                 if imageChunk in chunkSeen:

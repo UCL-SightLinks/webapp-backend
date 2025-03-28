@@ -1,19 +1,21 @@
 """Task handler module for managing task processing and cleanup."""
 
 import os
-import shutil
-import queue
-import threading
+import sys
 import time
+import json
 import uuid
-from datetime import datetime, timedelta
-import traceback
+import shutil
+import threading
 import zipfile
+import queue
+import psutil
+import rasterio
+import traceback
+from datetime import datetime, timedelta
 from concurrent.futures import ThreadPoolExecutor, Future
 from utils.compress import compress_folder_to_zip
 from utils.api.logger_handler import LoggerHandler
-import psutil
-import rasterio
 
 class TaskHandler:
     """Handles task processing, queuing, and cleanup."""
@@ -27,6 +29,13 @@ class TaskHandler:
         self.MAX_OUTPUT_AGE_HOURS = 2  # For output files and zips
         self.MAX_QUEUE_SIZE = 10
         self.MAX_CONCURRENT_TASKS = 5
+        
+        # Setup logger
+        self.logger = LoggerHandler()
+        
+        # Tasks persistence file - use absolute path
+        self.TASKS_DB_FILE = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))), 'tasks_db.json')
+        self.logger.log_system(f"Using tasks database file: {self.TASKS_DB_FILE}")
 
         # Task queue and tracking
         self.task_queue = queue.Queue(maxsize=self.MAX_QUEUE_SIZE)
@@ -34,6 +43,9 @@ class TaskHandler:
         self.task_lock = threading.Lock()
         self.cancelled_tasks = set()  # Track cancelled tasks
         self.task_events = {}  # Track cancellation events for each task
+        
+        # Load existing tasks from disk if available
+        self._load_tasks()
 
         # Server statistics
         self.stats = {
@@ -60,9 +72,6 @@ class TaskHandler:
         # Thread pool for parallel processing
         self.thread_pool = ThreadPoolExecutor(max_workers=self.MAX_CONCURRENT_TASKS)
         self.processing_tasks = set()  # Track currently processing tasks
-
-        # Initialize logger
-        self.logger = LoggerHandler()
 
         # Create base directories
         for folder in [self.BASE_UPLOAD_FOLDER, self.BASE_OUTPUT_FOLDER]:
@@ -203,7 +212,32 @@ class TaskHandler:
             }
 
         with self.task_lock:
+            # First check if task is in memory
             task = self.active_tasks.get(task_id)
+            
+            # If not in memory, try to load it from the persistent file
+            if not task:
+                try:
+                    if os.path.exists(self.TASKS_DB_FILE):
+                        with open(self.TASKS_DB_FILE, 'r') as f:
+                            tasks_db = json.load(f)
+                            task = tasks_db.get(task_id)
+                            
+                            if task:
+                                self.logger.log_system(f"Retrieved task {task_id} from disk")
+                                # Convert ISO datetime strings back to datetime objects
+                                if 'created_at' in task and isinstance(task['created_at'], str):
+                                    try:
+                                        task['created_at'] = datetime.fromisoformat(task['created_at'])
+                                    except ValueError:
+                                        task['created_at'] = datetime.now()
+                                
+                                # Add back to active_tasks if it's a completed task with outputs
+                                if task.get('status') == 'completed' and (task.get('output_folder') or task.get('zip_path')):
+                                    self.active_tasks[task_id] = task
+                except Exception as e:
+                    self.logger.log_error(f"Error loading task {task_id} from file: {str(e)}")
+            
             if not task:
                 return {
                     'status': 'unknown',
@@ -338,7 +372,7 @@ class TaskHandler:
 
     def process_task(self, task_id, input_folder, params, execute_func):
         """Process a task with the given parameters."""
-        logger_handler = LoggerHandler()
+        logger_handler = self.logger
         
         try:
             # Get session_id from input_folder
@@ -875,6 +909,9 @@ class TaskHandler:
                             if created_at and (current_time - created_at) > timedelta(hours=self.MAX_OUTPUT_AGE_HOURS):
                                 # Double check task is not processing or queued
                                 if task_id not in self.processing_tasks and task.get('status') not in ['queued', 'processing']:
+                                    # Save all tasks before removing this one to ensure it's persisted
+                                    self._save_tasks()
+                                    
                                     del self.active_tasks[task_id]
                                     if task_id in self.cancelled_tasks:
                                         self.cancelled_tasks.remove(task_id)
@@ -1038,3 +1075,160 @@ class TaskHandler:
             if task.get('id') == task_id:
                 return i
         return 0
+
+    def update_task_status(self, task_id, status, output_folder=None, session_id=None, error_message=None, total_detections=None, has_detections=None):
+        """Update task status in the task registry."""
+        try:
+            if task_id in self.active_tasks:
+                task = self.active_tasks[task_id]
+                task['status'] = status
+                task['last_updated'] = time.time()
+                
+                if status == 'completed':
+                    task['completed_at'] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                    
+                if output_folder:
+                    task['output_folder'] = output_folder
+                    
+                    # Look for the zip_path.txt file which contains the path to the output ZIP
+                    zip_path_file = os.path.join(output_folder, "zip_path.txt")
+                    if os.path.exists(zip_path_file):
+                        with open(zip_path_file, "r") as f:
+                            zip_path = f.read().strip()
+                            if os.path.exists(zip_path):
+                                task['zip_path'] = zip_path
+                                self.logger.log_system(f"Found ZIP path from zip_path.txt: {zip_path}")
+                    
+                    # Also check for no_detections.txt 
+                    no_detections_file = os.path.join(output_folder, "no_detections.txt")
+                    if os.path.exists(no_detections_file):
+                        task['has_detections'] = False
+                        self.logger.log_system(f"Found no_detections.txt, setting has_detections=False")
+                    else:
+                        # Check if detections.json exists and if it contains detections
+                        detections_file = os.path.join(output_folder, "detections.json")
+                        if os.path.exists(detections_file):
+                            try:
+                                with open(detections_file, "r") as f:
+                                    detections = json.load(f)
+                                    task['has_detections'] = len(detections) > 0
+                                    task['total_detections'] = sum(len(det.get("coordinates", [])) for det in detections)
+                                    self.logger.log_system(f"Found {task['total_detections']} detections in {len(detections)} images")
+                            except Exception as e:
+                                self.logger.log_error(f"Error reading detections.json: {str(e)}")
+                                task['has_detections'] = False
+                
+                if session_id:
+                    task['session_id'] = session_id
+                    
+                if error_message:
+                    task['error'] = error_message
+                    
+                if total_detections is not None:
+                    task['total_detections'] = total_detections
+                    
+                if has_detections is not None:
+                    task['has_detections'] = has_detections
+                    
+                self.logger.log_system(f"Updated task {task_id} status to {status}")
+                self._save_tasks()
+                return True
+            else:
+                self.logger.log_error(f"Task {task_id} not found for status update")
+                return False
+        except Exception as e:
+            self.logger.log_error(f"Error updating task status: {str(e)}")
+            return False
+
+    def _save_tasks(self):
+        """Save tasks to a persistent file."""
+        try:
+            # Create a serializable copy of the tasks
+            serializable_tasks = {}
+            
+            for task_id, task in self.active_tasks.items():
+                # Create a copy of the task without non-serializable items
+                task_copy = task.copy()
+                
+                # Remove non-serializable items
+                if 'future' in task_copy:
+                    del task_copy['future']
+                if 'extract_dir' in task_copy and isinstance(task_copy['extract_dir'], (set, dict)):
+                    del task_copy['extract_dir']
+                
+                # Convert datetime objects to strings
+                if 'created_at' in task_copy and isinstance(task_copy['created_at'], datetime):
+                    task_copy['created_at'] = task_copy['created_at'].isoformat()
+                
+                serializable_tasks[task_id] = task_copy
+            
+            # Ensure the directory exists
+            os.makedirs(os.path.dirname(self.TASKS_DB_FILE), exist_ok=True)
+            
+            # Save to file with pretty formatting
+            with open(self.TASKS_DB_FILE, 'w') as f:
+                json.dump(serializable_tasks, f, indent=2)
+                
+            self.logger.log_system(f"Saved {len(serializable_tasks)} tasks to {self.TASKS_DB_FILE}")
+            
+        except Exception as e:
+            self.logger.log_error(f"Error saving tasks to file: {str(e)}")
+            self.logger.log_error(traceback.format_exc())
+    
+    def _load_tasks(self):
+        """Load tasks from persistent file."""
+        try:
+            if not os.path.exists(self.TASKS_DB_FILE):
+                self.logger.log_system(f"Tasks database file not found: {self.TASKS_DB_FILE}")
+                return
+                
+            if os.path.getsize(self.TASKS_DB_FILE) == 0:
+                self.logger.log_system(f"Tasks database file is empty: {self.TASKS_DB_FILE}")
+                return
+                
+            with open(self.TASKS_DB_FILE, 'r') as f:
+                loaded_tasks = json.load(f)
+                
+            # Convert loaded tasks back to proper format
+            for task_id, task in loaded_tasks.items():
+                try:
+                    # Convert ISO datetime strings back to datetime objects
+                    if 'created_at' in task and isinstance(task['created_at'], str):
+                        try:
+                            task['created_at'] = datetime.fromisoformat(task['created_at'])
+                        except ValueError:
+                            task['created_at'] = datetime.now()
+                    
+                    # Add task to active_tasks
+                    self.active_tasks[task_id] = task
+                    
+                    # Recreate cancellation events for any task
+                    if task_id not in self.task_events:
+                        self.task_events[task_id] = threading.Event()
+                        
+                    # Set cancellation flag if task was cancelled
+                    if task.get('is_cancelled', False):
+                        self.cancelled_tasks.add(task_id)
+                        self.task_events[task_id].set()
+                        
+                    self.logger.log_system(f"Loaded task {task_id} ({task.get('status', 'unknown')})")
+                except Exception as task_error:
+                    self.logger.log_error(f"Error loading task {task_id}: {str(task_error)}")
+            
+            self.logger.log_system(f"Loaded {len(loaded_tasks)} tasks from {self.TASKS_DB_FILE}")
+            
+        except json.JSONDecodeError as json_error:
+            self.logger.log_error(f"JSON decode error loading tasks from file: {str(json_error)}")
+            self.logger.log_error(traceback.format_exc())
+            # Backup corrupted file
+            if os.path.exists(self.TASKS_DB_FILE):
+                backup_path = f"{self.TASKS_DB_FILE}.bak.{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+                try:
+                    shutil.copy2(self.TASKS_DB_FILE, backup_path)
+                    self.logger.log_system(f"Backed up corrupted tasks file to: {backup_path}")
+                except Exception as backup_error:
+                    self.logger.log_error(f"Error backing up corrupted tasks file: {str(backup_error)}")
+        except Exception as e:
+            self.logger.log_error(f"Error loading tasks from file: {str(e)}")
+            self.logger.log_error(traceback.format_exc())
+            # Start with empty tasks if there was an error loading

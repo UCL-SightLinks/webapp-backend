@@ -9,6 +9,8 @@ import time
 import sys
 import shutil
 import traceback
+import json
+import zipfile
 sys.dont_write_bytecode = True
 
 os.environ["GDAL_DISABLE_READDIR_ON_OPEN"] = "YES"
@@ -188,7 +190,10 @@ def process_single_input(uploadDir, inputType, classificationThreshold, predicti
             has_detections = saveToOutput(outputType=outputType, outputFolder=outputFolder, imageDetections=imageDetections)
             
             if not has_detections:
-                print("No detections found - not generating output files")
+                print("No detections found - creating no_detections.txt file")
+                no_detections_file = os.path.join(outputFolder, "no_detections.txt")
+                with open(no_detections_file, "w") as f:
+                    f.write("No detections found.")
                 # Return the output folder anyway so the no_detections.txt file can be accessed
                 return outputFolder
                 
@@ -245,7 +250,10 @@ def process_single_input(uploadDir, inputType, classificationThreshold, predicti
             has_detections = saveToOutput(outputType=outputType, outputFolder=outputFolder, imageDetections=imageDetections)
             
             if not has_detections:
-                print("No detections found - not generating output files")
+                print("No detections found - creating no_detections.txt file")
+                no_detections_file = os.path.join(outputFolder, "no_detections.txt")
+                with open(no_detections_file, "w") as f:
+                    f.write("No detections found.")
                 # Return the output folder anyway so the no_detections.txt file can be accessed
                 return outputFolder
                 
@@ -274,3 +282,81 @@ def process_single_input(uploadDir, inputType, classificationThreshold, predicti
             except Exception as cleanup_err:
                 print(f"Error cleaning up extract directory after error: {str(cleanup_err)}")
         raise  # Re-raise the original exception
+
+def saveToOutput(outputType, outputFolder, imageDetections):
+    """
+    This function will save the oriented bounding boxes to the output folder with the specified output type.
+    0 for JSON, 1 for TXT.
+    
+    Args:
+        outputType (str): The output type, 0 for JSON, 1 for TXT.
+        outputFolder (str): The folder to save the output to.
+        imageDetections (dict): A dictionary where the basename of an image is the key, and the key stores a list of boxes in latitude and longitude, and their respective confidence.
+    
+    Returns:
+        bool: True if detections were found and saved, False otherwise.
+    """
+    # Check if we have any detections
+    if not imageDetections or len(imageDetections) == 0:
+        print("No detections found.")
+        no_detections_file = os.path.join(outputFolder, "no_detections.txt")
+        with open(no_detections_file, "w") as f:
+            f.write("No detections found.")
+        return False
+    
+    if outputType == "0":
+        outputJson = []
+        for imageName, pointsAndDetections in imageDetections.items():
+            points, confidences = pointsAndDetections
+            outputJson.append({
+                "image": imageName,
+                "coordinates": points,
+                "confidence": confidences
+            })
+
+        print(f"Found {len(outputJson)} images with detections.")
+        with open(os.path.join(outputFolder, "detections.json"), "w") as f:
+            json.dump(outputJson, f, indent=2)
+    else:
+        with open(os.path.join(outputFolder, "detections.txt"), "w") as f:
+            for imageName, pointsAndDetections in imageDetections.items():
+                points, confidences = pointsAndDetections
+                f.write(f"Image: {imageName}\n")
+                for i, point in enumerate(points):
+                    f.write(f"Detection {i+1} (confidence: {confidences[i]:.4f}):\n")
+                    for coord in point:
+                        f.write(f"  {coord[0]}, {coord[1]}\n")
+                f.write("\n")
+    
+    # Create a ZIP file of the output folder for easier downloading
+    print("Creating ZIP file for download...")
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    zip_path = os.path.join(os.path.dirname(outputFolder), f"result_{timestamp}.zip")
+    
+    try:
+        with zipfile.ZipFile(zip_path, 'w', zipfile.ZIP_DEFLATED) as zipf:
+            # Add detection files
+            if os.path.exists(os.path.join(outputFolder, "detections.json")):
+                zipf.write(os.path.join(outputFolder, "detections.json"), "detections.json")
+            if os.path.exists(os.path.join(outputFolder, "detections.txt")):
+                zipf.write(os.path.join(outputFolder, "detections.txt"), "detections.txt")
+            
+            # Add labeled images if they exist
+            labeled_images_dir = os.path.join(outputFolder, "labeledImages", "run")
+            if os.path.exists(labeled_images_dir):
+                for file in os.listdir(labeled_images_dir):
+                    if file.endswith(".jpg") or file.endswith(".png"):
+                        file_path = os.path.join(labeled_images_dir, file)
+                        zipf.write(file_path, os.path.join("labeledImages", file))
+        
+        print(f"ZIP file created at: {zip_path}")
+        
+        # Store the ZIP path in a file for the API to find
+        with open(os.path.join(outputFolder, "zip_path.txt"), "w") as f:
+            f.write(zip_path)
+            
+    except Exception as e:
+        print(f"Error creating ZIP file: {str(e)}")
+        print(traceback.format_exc())
+    
+    return True

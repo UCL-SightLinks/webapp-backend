@@ -631,41 +631,70 @@ def download_result(token):
             logger_handler.log_error('Invalid token payload - missing task_id')
             return request_handler.create_error_response('Invalid token payload', 401)
         
-        task = task_handler.get_task_status(task_id)
-        if not task:
-            logger_handler.log_error(f'Task not found for download: {task_id}')
-            return request_handler.create_error_response('Task not found', 404)
-        
         # Get application root directory for absolute paths
         app_root = os.path.dirname(os.path.abspath(__file__))
         
-        # Debug logging for path investigation
+        # Get task status which will try to load from disk if not in memory
+        task = task_handler.get_task_status(task_id)
         logger_handler.log_system(f'App root directory: {app_root}')
         logger_handler.log_system(f'Task info: {task}')
         
-        # First check if the task has a stored detection status
-        if 'has_detections' in task:
-            has_detections = task.get('has_detections', False)
-            logger_handler.log_system(f'Download: Using stored detection status: {has_detections}')
+        # Check if task exists
+        if task.get('status') == 'unknown':
+            logger_handler.log_error(f'Task not found for download: {task_id}')
+            return request_handler.create_error_response('Task not found', 404)
+        
+        # Check if session_id is available
+        session_id = task.get('session_id')
+        if not session_id:
+            logger_handler.log_error(f'Session ID not found for task: {task_id}')
+            return request_handler.create_error_response('Session ID not found', 404)
+        
+        # If the task has a zip_path, use it directly
+        if task.get('zip_path'):
+            zip_path = task.get('zip_path')
             
-            # For tasks without detections, return the no_detections.txt file
-            if not has_detections:
-                # Find the output folder path
-                output_folder = task.get('output_folder')
-                if not output_folder and task.get('zip_path'):
-                    output_folder = os.path.dirname(task.get('zip_path'))
+            # Make sure zip_path is an absolute path
+            if not os.path.isabs(zip_path):
+                zip_path = os.path.join(app_root, zip_path)
                 
-                # Make sure output_folder is an absolute path
-                if output_folder and not os.path.isabs(output_folder):
-                    output_folder = os.path.join(app_root, output_folder)
+            logger_handler.log_system(f'Using stored ZIP path: {zip_path}')
+            
+            if os.path.exists(zip_path) and os.path.getsize(zip_path) > 0:
+                # Setup proper headers with a consistent filename
+                timestamp = datetime.now().strftime("%Y%m%d")
+                filename = f"result_{timestamp}.zip"
                 
-                logger_handler.log_system(f'No detections output folder path: {output_folder}')
+                logger_handler.log_file_operation('DOWNLOAD', zip_path)
+                response = send_file(
+                    zip_path,
+                    mimetype='application/zip',
+                    as_attachment=True,
+                    download_name=filename
+                )
                 
-                if not output_folder or not os.path.exists(output_folder):
-                    logger_handler.log_error(f'Output folder not found for no-detection task: {task_id}')
-                    return request_handler.create_error_response('Output folder not found', 404)
+                # Set detection headers
+                response.headers['X-Has-Detections'] = str(task.get('has_detections', False)).lower()
+                if task.get('total_detections') is not None:
+                    response.headers['X-Total-Detections'] = str(task.get('total_detections', 0))
                 
-                # Check for no_detections marker file
+                logger_handler.log_system(f'File download initiated with filename: {filename}, detections: {task.get("total_detections", 0)}')
+                return response
+            else:
+                logger_handler.log_error(f'ZIP file not found or empty: {zip_path}')
+                
+        # If the task has an output_folder, try to find the output folder
+        if task.get('output_folder'):
+            output_folder = task.get('output_folder')
+            
+            # Make sure output_folder is an absolute path
+            if not os.path.isabs(output_folder):
+                output_folder = os.path.join(app_root, output_folder)
+                
+            logger_handler.log_system(f'Using output folder: {output_folder}')
+            
+            # Check for no_detections.txt if has_detections is False
+            if not task.get('has_detections', True):
                 no_detections_marker = os.path.join(output_folder, "no_detections.txt")
                 if os.path.exists(no_detections_marker):
                     logger_handler.log_system(f'Sending no_detections marker file for task {task_id}')
@@ -678,279 +707,48 @@ def download_result(token):
                     )
                     response.headers['X-Has-Detections'] = 'false'
                     return response
-                else:
-                    # Create a temporary no_detections marker if it doesn't exist
-                    temp_marker = os.path.join(output_folder, "no_detections.txt")
-                    with open(temp_marker, 'w') as f:
-                        f.write("No detections found")
-                    logger_handler.log_system(f'Created and sending temporary no_detections marker for task {task_id}')
-                    response = send_file(
-                        temp_marker, 
-                        mimetype='text/plain',
-                        as_attachment=True,
-                        download_name=f'result_{timestamp}.txt'
-                    )
-                    response.headers['X-Has-Detections'] = 'false'
-                    return response
             
-            # For tasks with detections, continue with ZIP file download 
-            if has_detections and task.get('zip_path'):
-                zip_path = task.get('zip_path')
-                
-                # Make sure zip_path is an absolute path
-                if not os.path.isabs(zip_path):
-                    zip_path = os.path.join(app_root, zip_path)
-                
-                logger_handler.log_system(f'ZIP file path: {zip_path}')
-                
-                if not os.path.exists(zip_path):
-                    logger_handler.log_error(f'ZIP file not found at path: {zip_path}')
-                    return request_handler.create_error_response(f'ZIP file not found at path: {zip_path}', 404)
-                
-                file_size = os.path.getsize(zip_path)
-                if file_size == 0:
-                    logger_handler.log_error(f'Empty ZIP file: {zip_path}')
-                    return request_handler.create_error_response('ZIP file is empty', 404)
-                
-                logger_handler.log_system(f'Sending ZIP file with detections for task {task_id}')
-                logger_handler.log_file_operation('DOWNLOAD', zip_path)
-                
-                # Setup proper headers with a consistent filename
-                timestamp = datetime.now().strftime("%Y%m%d")
-                filename = f"result_{timestamp}.zip"
-                
-                # Use Flask's send_file directly to avoid nested ZIPs
-                response = send_file(
-                    zip_path,
-                    mimetype='application/zip',
-                    as_attachment=True,
-                    download_name=filename
-                )
-                
-                # Set detection headers
-                response.headers['X-Has-Detections'] = 'true'
-                if 'total_detections' in task:
-                    response.headers['X-Total-Detections'] = str(task.get('total_detections', 0))
-                
-                logger_handler.log_system(f'File download initiated with filename: {filename}, detections: {task.get("total_detections", 0)}')
-                return response
-                
-        # Get and verify zip path for tasks that don't have stored detection status
-        zip_path = task.get('zip_path')
-        if not zip_path:
-            logger_handler.log_error(f'ZIP path not found for task: {task_id}')
-            return request_handler.create_error_response('ZIP path not found in task data', 404)
-        
-        # Make sure zip_path is an absolute path
-        if not os.path.isabs(zip_path):
-            zip_path = os.path.join(app_root, zip_path)
+            # Look for ZIP files in the output folder's parent directory
+            parent_dir = os.path.dirname(output_folder)
+            timestamp_prefix = '_'.join(session_id.split('_')[:2])
             
-        logger_handler.log_system(f'ZIP path for task {task_id}: {zip_path}')
-        
-        if not os.path.exists(zip_path):
-            logger_handler.log_error(f'ZIP file not found at path: {zip_path}')
-            return request_handler.create_error_response(f'ZIP file not found at path: {zip_path}', 404)
-        
-        # Improved detection checking logic similar to get_task_status
-        zip_directory = os.path.dirname(zip_path)
-        session_id = task.get('session_id', '')
-        output_folder = None
-        has_detections = False
-        total_detections = 0
-        
-        # Try finding the actual output folder which contains the detection files
-        logger_handler.log_system(f'Checking for detections for download in session: {session_id}')
-        
-        # First check for a folder in run/output with the session_id name (using absolute path)
-        base_output_folder = os.path.join(app_root, 'run', 'output')
-        session_output = os.path.join(base_output_folder, session_id)
-        
-        logger_handler.log_system(f'Looking for session output at: {session_output}')
-        
-        if os.path.exists(session_output) and os.path.isdir(session_output):
-            output_folder = session_output
-            logger_handler.log_system(f'Download: Found output folder at session path: {output_folder}')
-        else:
-            # Next, look for folders in the zip directory that might contain the detection files
-            possible_folders = []
-            if os.path.exists(zip_directory) and os.path.isdir(zip_directory):
-                for item in os.listdir(zip_directory):
-                    item_path = os.path.join(zip_directory, item)
-                    if os.path.isdir(item_path):
-                        possible_folders.append(item_path)
-            
-            if len(possible_folders) == 1:
-                # If there's only one folder, use it
-                output_folder = possible_folders[0]
-                logger_handler.log_system(f'Download: Found single output folder: {output_folder}')
-            elif len(possible_folders) > 1:
-                # If there are multiple folders, try to find the one with detection files
-                for folder in possible_folders:
-                    if os.path.exists(os.path.join(folder, 'detections.json')):
-                        output_folder = folder
-                        logger_handler.log_system(f'Download: Found output folder with JSON: {output_folder}')
-                        break
-                
-                if not output_folder:
-                    # If still not found, use the most recently modified folder
-                    possible_folders.sort(key=os.path.getmtime, reverse=True)
-                    output_folder = possible_folders[0]
-                    logger_handler.log_system(f'Download: Using most recent folder: {output_folder}')
-        
-        # If we still don't have an output folder, just use the zip directory
-        if not output_folder:
-            output_folder = zip_directory
-            logger_handler.log_system(f'Download: Falling back to zip directory: {output_folder}')
-        
-        # Check for the no_detections marker file
-        no_detections_marker = os.path.join(output_folder, "no_detections.txt")
-        if os.path.exists(no_detections_marker):
-            has_detections = False
-            logger_handler.log_system(f'Download: No detections marker file found: {no_detections_marker}')
-        else:
-            # Check for detections.json which is the most reliable source
-            json_path = os.path.join(output_folder, "detections.json")
-            if os.path.exists(json_path) and os.path.getsize(json_path) > 10:
-                try:
-                    with open(json_path, 'r') as f:
-                        data = json.load(f)
-                        # Count detections across all images
-                        for item in data:
-                            coordinates = item.get('coordinates', [])
-                            if isinstance(coordinates, list):
-                                total_detections += len(coordinates)
-                
-                    has_detections = total_detections > 0
-                    logger_handler.log_system(f'Download: Found {total_detections} total detections in JSON data')
-                except Exception as e:
-                    logger_handler.log_error(f'Download: Error reading JSON: {str(e)}')
-            
-            # If no JSON or no detections found in JSON, check TXT files
-            if not has_detections and os.path.exists(output_folder):
-                txt_files = [f for f in os.listdir(output_folder) if f.endswith('.txt') and f != "no_detections.txt"]
-                if txt_files:
-                    for txt_file in txt_files:
-                        txt_path = os.path.join(output_folder, txt_file)
-                        # Count lines as detections if file is not empty
-                        if os.path.getsize(txt_path) > 0:
-                            try:
-                                with open(txt_path, 'r') as f:
-                                    lines = [line.strip() for line in f if line.strip()]
-                                    total_detections += len(lines)
-                            except Exception as e:
-                                logger_handler.log_error(f'Download: Error reading TXT file: {str(e)}')
+            for filename in os.listdir(parent_dir):
+                if filename.startswith('result_') and filename.endswith('.zip'):
+                    zip_path = os.path.join(parent_dir, filename)
+                    logger_handler.log_system(f'Found ZIP file: {zip_path}')
                     
-                    has_detections = total_detections > 0
-        
-        logger_handler.log_system(f'Download: Final detection status: has_detections={has_detections}, total_detections={total_detections}')
-        
-        # If no detections were found, we should still return the marker file
-        # but also include a flag in the response so the client knows
-        if not has_detections:
-            logger_handler.log_system(f'No detections found for task {task_id}, sending marker file')
-            # If no_detections marker exists, send it
-            timestamp = datetime.now().strftime("%Y%m%d")
-            if os.path.exists(no_detections_marker):
-                logger_handler.log_system(f'Using existing no_detections marker: {no_detections_marker}')
-                response = send_file(
-                    no_detections_marker, 
-                    mimetype='text/plain',
-                    as_attachment=True,
-                    download_name=f'result_{timestamp}.txt'
-                )
-            else:
-                # Create a temporary no_detections marker
-                temp_marker = os.path.join(output_folder, "no_detections.txt")
-                logger_handler.log_system(f'Creating temporary no_detections marker: {temp_marker}')
-                try:
-                    with open(temp_marker, 'w') as f:
-                        f.write("No detections found")
+                    # Update task with zip_path
+                    with task_handler.task_lock:
+                        if task_id in task_handler.active_tasks:
+                            task_handler.active_tasks[task_id]['zip_path'] = zip_path
+                            task_handler._save_tasks()
+                    
+                    # Send the file
+                    timestamp = datetime.now().strftime("%Y%m%d")
+                    download_filename = f"result_{timestamp}.zip"
+                    
+                    logger_handler.log_file_operation('DOWNLOAD', zip_path)
                     response = send_file(
-                        temp_marker, 
-                        mimetype='text/plain',
+                        zip_path,
+                        mimetype='application/zip',
                         as_attachment=True,
-                        download_name=f'result_{timestamp}.txt'
+                        download_name=download_filename
                     )
-                except Exception as e:
-                    logger_handler.log_error(f'Error creating no_detections file: {str(e)}')
-                    return request_handler.create_error_response(f'Error creating no_detections file: {str(e)}', 500)
-            response.headers['X-Has-Detections'] = 'false'
-            return response
+                    
+                    # Set detection headers
+                    response.headers['X-Has-Detections'] = str(task.get('has_detections', True)).lower()
+                    if task.get('total_detections') is not None:
+                        response.headers['X-Total-Detections'] = str(task.get('total_detections', 0))
+                    
+                    logger_handler.log_system(f'File download initiated with filename: {download_filename}, detections: {task.get("total_detections", 0)}')
+                    return response
         
-        # Double check zip file exists with better error logging
-        if not os.path.exists(zip_path):
-            logger_handler.log_error(f'ZIP file not found at path for download: {zip_path}')
-            
-            # Try to find the zip file in the output directory by pattern matching
-            # This is a fallback in case the path was incorrectly stored
-            matching_zips = []
-            if os.path.exists(output_folder):
-                for file in os.listdir(output_folder):
-                    if file.endswith('.zip'):
-                        matching_zips.append(os.path.join(output_folder, file))
-            
-            if matching_zips:
-                # Use the most recent zip file
-                matching_zips.sort(key=os.path.getmtime, reverse=True)
-                zip_path = matching_zips[0]
-                logger_handler.log_system(f'Found alternative ZIP file: {zip_path}')
-            else:
-                return request_handler.create_error_response(f'ZIP file not found at path: {zip_path}', 404)
+        # If we got here, we couldn't find a valid download file
+        logger_handler.log_error(f'ZIP path not found for task: {task_id}')
+        return request_handler.create_error_response('ZIP path not found in task data', 404)
         
-        file_size = os.path.getsize(zip_path)
-        if file_size == 0:
-            logger_handler.log_error(f'Empty ZIP file: {zip_path}')
-            return request_handler.create_error_response('ZIP file is empty', 404)
-        
-        logger_handler.log_file_operation('VERIFY', zip_path)
-        
-        # Verify zip file integrity
-        try:
-            with zipfile.ZipFile(zip_path, 'r') as zf:
-                contents = zf.namelist()
-                if zf.testzip() is not None:
-                    logger_handler.log_error(f'Corrupted ZIP file: {zip_path}')
-                    return request_handler.create_error_response('ZIP file is corrupted', 500)
-                if not contents:
-                    logger_handler.log_error(f'Empty ZIP file contents: {zip_path}')
-                    return request_handler.create_error_response('ZIP file has no contents', 500)
-                logger_handler.log_file_operation('ZIP_CONTENTS', zip_path, details=f"Files: {contents}")
-        except Exception as e:
-            logger_handler.log_error(f'ZIP verification failed: {str(e)}')
-            return request_handler.create_error_response(f'Error verifying ZIP file: {str(e)}', 500)
-        
-        logger_handler.log_file_operation('DOWNLOAD', zip_path)
-        
-        # Send file
-        try:
-            # FIXED: Use direct send_file instead of the file_handler to avoid double-wrapping
-            # Get only the needed data from file_handler.send_file_response
-            logger_handler.log_system(f'Directly sending file: {zip_path}')
-            
-            # Setup proper headers with a consistent filename
-            timestamp = datetime.now().strftime("%Y%m%d")
-            filename = f"result_{timestamp}.zip"
-            
-            # Use Flask's send_file directly to avoid nested ZIPs
-            response = send_file(
-                zip_path,
-                mimetype='application/zip',
-                as_attachment=True,
-                download_name=filename
-            )
-            
-            # Set X-Has-Detections header
-            response.headers['X-Has-Detections'] = 'true'
-            response.headers['X-Total-Detections'] = str(total_detections)
-            logger_handler.log_system(f'File download initiated with filename: {filename}, detections: {total_detections}')
-            
-            return response
-        except Exception as e:
-            logger_handler.log_error(f'File send failed: {str(e)}')
-            return request_handler.create_error_response(f'Error sending file: {str(e)}', 500)
-            
     except Exception as e:
-        logger_handler.log_error(str(e), details=traceback.format_exc())
+        logger_handler.log_error(f'Download error: {str(e)}', details=traceback.format_exc())
         return request_handler.create_error_response(str(e), 500)
 
 @app.route('/web/cancel/<task_id>', methods=['POST'])

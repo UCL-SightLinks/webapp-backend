@@ -303,17 +303,17 @@ def predictionTIF(imageAndDatas, predictionThreshold=0.25, saveLabeledImage=Fals
                     print(f"Running YOLO model on image")
                     results = model(temp_jpg, save=saveLabeledImage, conf=predictionThreshold, iou=0.3, 
                                   project=outputFolder+"/labeledImages", name="run", exist_ok=True, verbose=True)
-                    
+                
                     if saveLabeledImage and os.path.exists(outputFolder+"/labeledImages/run/image0.jpg"):
                         os.rename(outputFolder+"/labeledImages/run/image0.jpg", outputFolder+f"/labeledImages/run/image{numOfSavedImages}.jpg")
                         numOfSavedImages += 1
-                    
-                    # Save the original PIL image with detections
-                    if len(results) > 0 and saveLabeledImage:
-                        detection_img_path = os.path.join(outputFolder, f"{baseName}_r{row}_c{col}_detections.jpg")
-                        pil_image.save(detection_img_path)
-                        print(f"Saved detection image to {detection_img_path}")
-                    
+                        
+                        # Save the original PIL image with detections
+                        if len(results) > 0 and saveLabeledImage:
+                            detection_img_path = os.path.join(outputFolder, f"{baseName}_r{row}_c{col}_detections.jpg")
+                            pil_image.save(detection_img_path)
+                            print(f"Saved detection image to {detection_img_path}")
+                        
                     # Process results
                     for result in results:
                         result = result.cpu()
@@ -356,7 +356,7 @@ def predictionTIF(imageAndDatas, predictionThreshold=0.25, saveLabeledImage=Fals
                         imageDetectionsRowCol[baseNameWithRowCol] = [allPointsList, allConfidenceList]
                     else:
                         print("No detections found in this chunk")
-                        
+                    
                 except Exception as e:
                     print(f"Error processing {baseName}: {e}")
                     print(traceback.format_exc())
