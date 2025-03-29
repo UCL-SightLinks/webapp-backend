@@ -1,221 +1,133 @@
-# SightLinks
+# SightLinks Backend
 
-SightLinks is a computer vision system designed to detect and georeference crosswalks in aerial imagery. It processes .jpg (or .jpeg, .png) with their corresponding .jgw file and .tif files, providing oriented bounding boxes with latitude and longitude coordinates. The system uses a combination of image segmentation, mobileNet detection, YOLO-based detection, georeferencing, and filtering to accurately identify and locate crosswalks in aerial photographs.
+This repository contains the backend for the SightLinks web application, an AI-powered system for detecting solar panels from aerial imagery.
 
-## Table of Contents
+## System Overview
 
-- [Features](#features)
-- [Prerequisites](#prerequisites)
-- [Installation](#installation)
-- [Quick Start](#quick-start)
-- [Usage Guide](#usage-guide)
-- [Project Structure](#project-structure)
-- [Technical Details](#technical-details)
-- [Troubleshooting](#troubleshooting)
-- [Contributing](#contributing)
+The SightLinks backend is a Flask-based API that processes aerial images using computer vision and deep learning techniques to detect and analyze solar panels. The key components include:
 
-## Features
+- **Image Segmentation**: Processes large aerial images by dividing them into manageable chunks
+- **Object Detection**: Uses YOLOv11 models (n/s/m variants) to detect solar panels with oriented bounding boxes
+- **Classification**: Analyzes detected areas to verify solar panel presence
+- **Georeferencing**: Processes georeferenced images (.jgw/.tfw files or GeoTIFF) to provide accurate location data
+- **Task Queue**: Handles asynchronous processing of submitted tasks
+- **API Endpoints**: Provides REST endpoints for submitting, monitoring, and retrieving results
 
-- Supports .jpg with .jgw files and .tif files
-- Automatic extraction and handling of zip input files
-- Crosswalk detection using YOLO-based models (multiple variants available)
-- Automatic georeferencing and filtering of detected crosswalks
-- Multiple output formats (JSON/TXT)
-- Progress tracking with detailed progress bars
-- Organized output with timestamped directories
-- Handles both single files and batch processing
-- Visualization tool for comparing detection results.
+## Deployment Instructions
 
-## Prerequisites
+### Prerequisites
 
-- Python 3.8 or higher
-- pip package manager
-- Git
-- CUDA-capable GPU recommended for faster processing
-- Sufficient disk space for image processing
-- Required Python packages (installed via requirements.txt)
+- Python 3.8+
+- GDAL 3.6.4
+- PyTorch 2.0.0+
+- CUDA-capable GPU (recommended for production)
 
-## Installation
+### Setup
 
 1. Clone the repository:
 
-```bash
-git clone https://github.com/UCL-SightLinks/SightLinks-Main.git
-cd SightLinks-Main
-```
-
+   ```bash
+   git clone https://github.com/UCL-SightLinks/webapp-backend.git
+   cd webapp-backend
+   ```
 2. Create and activate a virtual environment:
 
-```bash
-# Create virtual environment
-python -m venv venv
-
-# Activate virtual environment
-# On macOS/Linux:
-source venv/bin/activate
-# On Windows:
-venv\Scripts\activate
-```
-
+   ```bash
+   python -m venv venv
+   source venv/bin/activate  # On Windows: venv\Scripts\activate
+   ```
 3. Install dependencies:
 
-For Windows and Linux Machines:
-```bash
-sudo apt update
-sudo apt install gdal-bin libgdal-dev
-pip install -r requirements.txt
-```
-For MacOS machines:
-```bash
-brew update
-brew install gdal
-pip install -r requirements.txt
-```
+   ```bash
+   pip install -r requirements.txt
+   ```
+4. Create necessary directories:
 
-## Quick Start
+   ```bash
+   mkdir -p input run/output run/extract
+   ```
+5. Download required model files and place them in the `models` directory:
 
-1. Place input files in the `input` directory:
+   - YOLOv11 models: yolo-n.pt, yolo-s.pt, yolo-m.pt
+   - Classification models: MobileNetV3_state_dict_big_train.pth, VGG16_Full_State_Dict.pth
 
-   - For .jpg/.jgw data: Place zip files containing .jpg/.jgw files (e.g. from Digimap), or directly place the .jpg/.jgw files.
-   - For .tif data: Place zip files containing .tif files, or directly place the .tif files.
-2. Run the system:
+### Running in Development
+
+For development purposes, you can run the application with:
 
 ```bash
-python run.py
+python app.py
 ```
 
-## Usage Guide
+The server will start on http://localhost:5000 (default Flask port).
 
-### Basic Usage
+### Production Deployment
 
-```python
-// This snippet of code is from run.py
-from main import execute
+For production deployment, we recommend using Gunicorn:
 
-execute(
-    uploadDir="input",           # Input directory
-    inputType="0",              # "0" for .jpg/.jgw, "1" for .tif files
-    classificationThreshold=0.35,
-    predictionThreshold=0.5,
-    saveLabeledImage=False,
-    outputType="0",             # "0" for JSON, "1" for TXT
-    yolo_model_type="n"         # "n" for nano model
-)
-```
+1. Configure your environment:
 
-### Output Formats
+   ```bash
+   cp startup.txt.example startup.txt
+   # Edit startup.txt as needed
+   ```
+2. Start the server using the startup script:
 
-1. JSON Format (output_type="0"):
+   ```bash
+   chmod +x startup.sh
+   ./startup.sh
+   ```
+3. Alternatively, run Gunicorn directly:
 
-```json
-[
-  {
-    "image": "image_name.jpg",
-    "coordinates": [
-      [[lon1,lat1], [lon2,lat2], [lon3,lat3], [lon4,lat4]],  # crosswalk 1
-      [[lon1,lat1], [lon2,lat2], [lon3,lat3], [lon4,lat4]]   # crosswalk 2
-    ]
-  }
-]
-```
+   ```bash
+   gunicorn --bind 0.0.0.0:8000 \
+            --timeout 600 \
+            --workers 2 \
+            --threads 4 \
+            --log-level info \
+            app:app
+   ```
 
-2. TXT Format (output_type="1"):
+### Docker Deployment
 
-- One file per original image
-- Each line represents one building:
+A Dockerfile is included for containerized deployment:
 
-```
-lon1,lat1 lon2,lat2 lon3,lat3 lon4,lat4
-```
+1. Build the Docker image:
 
-### Output Directory Structure
+   ```bash
+   docker build -t sightlinks-backend .
+   ```
+2. Run the container:
 
-```
-run/output/YYYYMMDD_HHMMSS/  # Timestamp-based directory
-├── output.json              # If JSON output selected
-├── image_name.txt          # If TXT output selected (one per image)
-└── labeledImages/          # Optional: Images with visualized detections
-```
+   ```bash
+   docker run -p 8000:8000 -v /path/to/data:/app/input sightlinks-backend
+   ```
 
-## Project Structure
+## API Endpoints
 
-```
-SightLinks-Main/
-├── classificationScreening/    # Building classification module
-│   ├── classify.py            # Main classification logic
-│   └── utils/                 # Classification utilities
-├── imageSegmentation/         # Image segmentation modules
-│   ├── boundBoxSegmentation.py       # Bounding box segmentation
-│   └── classificationSegmentation.py  # Classification segmentation
-├── models/                    # YOLO model files
-│   ├── yolo-n.pt             # Nano model
-│   └── mn3_vs55.pth     # Classification Model
-├── georeference/             # Georeferencing utilities
-│   └── Georeference.py       # Coordinate conversion functions
-├── utils/                    # Utility functions
-│   ├── extract.py           # File extraction handling
-│   ├── compress.py           # File compression handling
-│   ├── filterOutput.py           # Filters bounding boxes to remove duplicates
-│   ├── saveToOutput.py           # Saves stored coordinates to output file
-│   └── visualize.py           # Result analysis tools
-├── run/                      # Runtime directories
-│   └── output/              # Timestamped outputs
-├── input/                   # Input file directory
-├── requirements.txt         # Python dependencies
-├── main.py                 # Main execution module
-└── run.py                  # Quick start script
-```
+- `GET /test` - Test endpoint to verify API functionality
+- `POST /predict` - Synchronous prediction endpoint (waits for completion)
+- `POST /web/predict` - Asynchronous prediction endpoint (returns task ID)
+- `GET /web/status/<task_id>` - Get status of a submitted task
+- `GET /download/<token>` - Download results using a token
+- `POST /web/cancel/<task_id>` - Cancel a running task
+- `GET /server-status` - Get server status information
 
-## Technical Details
+## Configuration
 
-### Processing Pipeline
+Core application settings can be modified in `run.py`, including:
 
-1. **File Extraction**
-
-   - Handles .jpg/.jgw files and .tif files
-   - Filters system files and unsupported formats
-   - Organizes files for processing
-2. **Image Segmentation**
-
-   - Segments large aerial images
-   - Prepares chunks for classification
-3. **Image classification**
-
-   - Process the segmented images using the classification model
-   - Returns True if the model's confidence is greater than a certain threshold
-4. **Image Segmentation**
-
-   - Re-segment the images based on the rows and columns of interest (where the classification model returns True)
-   - Prepares chunks for classification
-5. **Crosswalk Detection**
-
-   - Uses selected YOLO model variant
-   - Applies confidence thresholds
-   - Supports multiple model types for different performance/accuracy trade-offs
-6. **Georeferencing**
-
-   - Converts pixel coordinates to geographical coordinates
-   - Uses .jgw world files or data stored in .tif files for accurate mapping 
-   - Handles coordinate system transformations
-7. **Filtering**
-
-   - Removes duplicate bounding boxes by using Non-Maximum Suppression
-8. **Output Generation**
-
-   - Creates timestamped directories
-   - Generates selected output format
-   - Optionally saves labeled images
-
-### Performance Optimization
-
-- GPU acceleration for faster processing
-- Filter by row and column for a more optimised filter
-- Progress tracking with a progress bar
-- Configurable model selection for speed/accuracy balance
+- `uploadDir` - Directory for uploaded files
+- `inputType` - Type of input (0 for JPG/JGW, 1 for TIF)
+- `classificationThreshold` - Threshold for classification model
+- `predictionThreshold` - Threshold for YOLO detection model
+- `saveLabeledImage` - Whether to save labeled images
+- `outputType` - Output format (0 for JSON, 1 for TXT)
+- `yoloModelType` - YOLO model variant ('n', 's', or 'm')
 
 ## Troubleshooting
 
-Common issues and solutions:
-
-- **Memory errors**: Reduce batch size or use nano model
-- **Missing files**: Check input directory structure
+- Check the application logs for error messages
+- Verify CUDA availability with the `/test` endpoint
+- Ensure all required model files exist in the `models` directory
+- Check disk space, as large image files can consume significant storage
