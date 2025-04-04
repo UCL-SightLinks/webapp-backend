@@ -74,7 +74,7 @@ conda install -c conda-forge gdal=3.6.4
 pip install -r requirements.txt
 ```
 IMPORTANT NOTE:
-   - Please verify that the correct GDAL version has been installed (3.6.4), **If a newer is installed, it will not run.**
+   - Please verify that the correct GDAL version has been installed (3.6.4), **If a newer version is installed, it will not run.**
    - You can check the version through your terminal with: gdalinfo --version
    - It is important to note that GDAL is difficult to work with on brew as they only store most recent versions of gdal.
    - If on a higher version:
