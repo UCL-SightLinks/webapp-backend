@@ -51,10 +51,12 @@ cd SightLinks-Main
 python -m venv venv
 
 # Activate virtual environment
-# On macOS/Linux:
-source venv/bin/activate
-# On Windows:
+# On macOS: 
+Not necessary as we will be using conda
+# On Windows/Linux:
 venv\Scripts\activate
+# On Linux:
+source venv/bin/activate
 ```
 
 3. Install dependencies:
