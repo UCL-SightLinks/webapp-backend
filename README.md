@@ -28,7 +28,7 @@ SightLinks is a computer vision system designed to detect and georeference cross
 
 ## Prerequisites
 
-- Python 3.8 or higher
+- Python 3.10 or higher
 - pip package manager
 - Git
 - CUDA-capable GPU recommended for faster processing
