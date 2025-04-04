@@ -84,7 +84,7 @@ def predictionJGW(imageAndDatas, predictionThreshold=0.25, saveLabeledImage=Fals
 def predictionTIF(imageAndDatas, predictionThreshold=0.25, saveLabeledImage=False, outputFolder="run/output", modelType="n", boundBoxChunkSize=1024, classificationChunkSize=256):
     """
     This function will take all of the segmented image and their georeferencing data from imageAndDatas, where the model then 
-    processes the image and  creates a list of bounding boxes. It then takes each bounding box, georeferences it, and then 
+    processes the image and creates a list of bounding boxes. It then takes each bounding box, georeferences it, and then 
     stores it in the dictionary imageDetectionsRowCol, where the key stores the basename, row, and column which this bounding 
     box came from. After looping through all of the items, it is then filtered to reduce duplications. This filter also 
     removes the row and column data, storing all of the bounding boxes from one image with the image name as the key.
@@ -303,17 +303,17 @@ def predictionTIF(imageAndDatas, predictionThreshold=0.25, saveLabeledImage=Fals
                     print(f"Running YOLO model on image")
                     results = model(temp_jpg, save=saveLabeledImage, conf=predictionThreshold, iou=0.3, 
                                   project=outputFolder+"/labeledImages", name="run", exist_ok=True, verbose=True)
-                
+                    
                     if saveLabeledImage and os.path.exists(outputFolder+"/labeledImages/run/image0.jpg"):
                         os.rename(outputFolder+"/labeledImages/run/image0.jpg", outputFolder+f"/labeledImages/run/image{numOfSavedImages}.jpg")
                         numOfSavedImages += 1
-                        
-                        # Save the original PIL image with detections
-                        if len(results) > 0 and saveLabeledImage:
-                            detection_img_path = os.path.join(outputFolder, f"{baseName}_r{row}_c{col}_detections.jpg")
-                            pil_image.save(detection_img_path)
-                            print(f"Saved detection image to {detection_img_path}")
-                        
+                    
+                    # Save the original PIL image with detections
+                    if len(results) > 0 and saveLabeledImage:
+                        detection_img_path = os.path.join(outputFolder, f"{baseName}_r{row}_c{col}_detections.jpg")
+                        pil_image.save(detection_img_path)
+                        print(f"Saved detection image to {detection_img_path}")
+                    
                     # Process results
                     for result in results:
                         result = result.cpu()
@@ -356,7 +356,7 @@ def predictionTIF(imageAndDatas, predictionThreshold=0.25, saveLabeledImage=Fals
                         imageDetectionsRowCol[baseNameWithRowCol] = [allPointsList, allConfidenceList]
                     else:
                         print("No detections found in this chunk")
-                    
+                        
                 except Exception as e:
                     print(f"Error processing {baseName}: {e}")
                     print(traceback.format_exc())

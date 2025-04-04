@@ -710,12 +710,13 @@ def download_result(token):
             
             # Look for ZIP files in the output folder's parent directory
             parent_dir = os.path.dirname(output_folder)
-            timestamp_prefix = '_'.join(session_id.split('_')[:2])
+            logger_handler.log_system(f'Looking for ZIP files in {parent_dir} for task {task_id}')
             
+            # First try to find a ZIP with the task_id in its name
             for filename in os.listdir(parent_dir):
-                if filename.startswith('result_') and filename.endswith('.zip'):
+                if filename.startswith('result_') and filename.endswith('.zip') and task_id in filename:
                     zip_path = os.path.join(parent_dir, filename)
-                    logger_handler.log_system(f'Found ZIP file: {zip_path}')
+                    logger_handler.log_system(f'Found task-specific ZIP file: {zip_path}')
                     
                     # Update task with zip_path
                     with task_handler.task_lock:
@@ -742,6 +743,50 @@ def download_result(token):
                     
                     logger_handler.log_system(f'File download initiated with filename: {download_filename}, detections: {task.get("total_detections", 0)}')
                     return response
+            
+            # If no task-specific ZIP was found, look for session-specific ZIPs
+            timestamp_prefix = '_'.join(session_id.split('_')[:2]) if session_id else ""
+            logger_handler.log_system(f'Looking for session timestamp prefix: {timestamp_prefix}')
+            
+            # Find the most recent ZIP file
+            matching_zips = []
+            for filename in os.listdir(parent_dir):
+                if filename.startswith('result_') and filename.endswith('.zip'):
+                    file_path = os.path.join(parent_dir, filename)
+                    matching_zips.append((file_path, os.path.getmtime(file_path)))
+            
+            # Sort by modification time, newest first
+            if matching_zips:
+                matching_zips.sort(key=lambda x: x[1], reverse=True)
+                # Get the most recent ZIP
+                zip_path = matching_zips[0][0]
+                logger_handler.log_system(f'Found most recent ZIP file as fallback: {zip_path}')
+                
+                # Update task with zip_path
+                with task_handler.task_lock:
+                    if task_id in task_handler.active_tasks:
+                        task_handler.active_tasks[task_id]['zip_path'] = zip_path
+                        task_handler._save_tasks()
+                
+                # Send the file
+                timestamp = datetime.now().strftime("%Y%m%d")
+                download_filename = f"result_{timestamp}.zip"
+                
+                logger_handler.log_file_operation('DOWNLOAD', zip_path)
+                response = send_file(
+                    zip_path,
+                    mimetype='application/zip',
+                    as_attachment=True,
+                    download_name=download_filename
+                )
+                
+                # Set detection headers
+                response.headers['X-Has-Detections'] = str(task.get('has_detections', True)).lower()
+                if task.get('total_detections') is not None:
+                    response.headers['X-Total-Detections'] = str(task.get('total_detections', 0))
+                
+                logger_handler.log_system(f'File download initiated with filename: {download_filename}, detections: {task.get("total_detections", 0)}')
+                return response
         
         # If we got here, we couldn't find a valid download file
         logger_handler.log_error(f'ZIP path not found for task: {task_id}')

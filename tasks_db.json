@@ -1,15 +1,15 @@
 {
-  "2eadd8bb-92db-4cf3-a525-cd4102ae3420": {
-    "id": "2eadd8bb-92db-4cf3-a525-cd4102ae3420",
+  "117bb41e-f576-4041-8d62-8df8ab6d2abb": {
+    "id": "117bb41e-f576-4041-8d62-8df8ab6d2abb",
     "status": "completed",
     "progress": 100,
     "stage": "Completed",
-    "created_at": "2025-03-28T16:56:02.787907",
-    "session_id": "20250328_165602_09ff0b7b",
-    "input_folder": "/home/sightlinks/webapp-backend/input/20250328_165602_09ff0b7b",
+    "created_at": "2025-04-04T05:58:42.198645",
+    "session_id": "20250404_055842_960d048c",
+    "input_folder": "/home/sightlinks/webapp-backend/input/20250404_055842_960d048c",
     "is_cancelled": false,
     "queue_position": 1,
-    "output_folder": "/home/sightlinks/webapp-backend/run/output/20250328_165602",
-    "zip_path": "/home/sightlinks/webapp-backend/run/output/result_20250328_165604.zip"
+    "output_folder": "/home/sightlinks/webapp-backend/run/output/20250404_055842",
+    "zip_path": "/home/sightlinks/webapp-backend/run/output/result_20250404_055850_117bb41e-f576-4041-8d62-8df8ab6d2abb.zip"
   }
 }

@@ -331,7 +331,15 @@ def saveToOutput(outputType, outputFolder, imageDetections):
     # Create a ZIP file of the output folder for easier downloading
     print("Creating ZIP file for download...")
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    zip_path = os.path.join(os.path.dirname(outputFolder), f"result_{timestamp}.zip")
+    # Extract task_id from folder path if available (output folders are typically named with session_id)
+    session_id = os.path.basename(outputFolder)
+    task_id = os.environ.get('CURRENT_TASK_ID', '')  # Get task_id from environment if set
+    
+    # Create a unique ZIP name with task_id to ensure proper matching
+    if task_id:
+        zip_path = os.path.join(os.path.dirname(outputFolder), f"result_{timestamp}_{task_id}.zip")
+    else:
+        zip_path = os.path.join(os.path.dirname(outputFolder), f"result_{timestamp}.zip")
     
     try:
         with zipfile.ZipFile(zip_path, 'w', zipfile.ZIP_DEFLATED) as zipf:

@@ -466,16 +466,24 @@ class TaskHandler:
                 if os.path.exists(models_dir):
                     logger_handler.log_system(f"Available models: {os.listdir(models_dir)}")
                 
-                # Execute the main processing function
-                output_folder = execute_func(
-                    input_folder,
-                    input_type,
-                    classification_threshold,
-                    prediction_threshold,
-                    save_labeled_image,
-                    output_type,
-                    yolo_model_type
-                )
+                # Set CURRENT_TASK_ID in environment for the saveToOutput function
+                os.environ['CURRENT_TASK_ID'] = task_id
+                
+                try:
+                    # Execute the main processing function
+                    output_folder = execute_func(
+                        input_folder,
+                        input_type,
+                        classification_threshold,
+                        prediction_threshold,
+                        save_labeled_image,
+                        output_type,
+                        yolo_model_type
+                    )
+                finally:
+                    # Always remove the task ID from environment to avoid affecting other tasks
+                    if 'CURRENT_TASK_ID' in os.environ:
+                        del os.environ['CURRENT_TASK_ID']
                 
                 logger_handler.log_system(f"\nMain processing completed. Output folder: {output_folder}")
                 
