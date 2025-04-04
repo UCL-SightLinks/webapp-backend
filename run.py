@@ -24,7 +24,7 @@ outputType = "0"
 # 'n' for yolo11n-obb
 # 's' for yolo11s-obb
 # 'm' for yolo11m-obb
-yoloModelType = 'n'
+yoloModelType = 'm'
 
 if __name__ == "__main__":
     execute(uploadDir, 
