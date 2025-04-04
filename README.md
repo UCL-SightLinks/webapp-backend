@@ -58,7 +58,6 @@ venv\Scripts\activate
 ```
 
 3. Install dependencies:
-
 For Windows and Linux Machines:
 ```bash
 sudo apt update
@@ -67,10 +66,18 @@ pip install -r requirements.txt
 ```
 For MacOS machines:
 ```bash
-brew update
-brew install gdal
+conda create --name myenv python=3.8
+conda activate myenv
+conda install -c conda-forge gdal=3.6.4
 pip install -r requirements.txt
 ```
+IMPORTANT NODE:
+   - Please verify that the correct GDAL version has been installed (3.6.4)
+   - You can check the version through your terminal with: gdalinfo --version
+   - It is important to note that GDAL is difficult to work with on brew as they only store most recent versions of gdal.
+   - If on a higher version:
+      1. Delete the current gdal
+      2. Install specifically for version 3.6.4
 
 ## Quick Start
 
